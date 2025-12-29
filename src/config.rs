@@ -3,6 +3,22 @@
 use std::time::Duration;
 
 /// Configuration for object pool behavior
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::PoolConfiguration;
+/// use std::time::Duration;
+///
+/// let config = PoolConfiguration::<i32>::new()
+///     .with_max_pool_size(100)
+///     .with_max_active_objects(50)
+///     .with_timeout(Duration::from_secs(30))
+///     .with_ttl(Duration::from_secs(3600));
+///
+/// assert_eq!(config.max_pool_size, 100);
+/// assert_eq!(config.max_active_objects, Some(50));
+/// ```
 #[derive(Debug, Clone)]
 pub struct PoolConfiguration<T> {
     /// Maximum number of objects that can exist in the pool
@@ -64,6 +80,17 @@ impl<T> PoolConfiguration<T> {
     }
     
     /// Set the maximum pool size
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use objectpool::PoolConfiguration;
+    ///
+    /// let config = PoolConfiguration::<i32>::new()
+    ///     .with_max_pool_size(50);
+    ///
+    /// assert_eq!(config.max_pool_size, 50);
+    /// ```
     pub fn with_max_pool_size(mut self, size: usize) -> Self {
         self.max_pool_size = size;
         self
@@ -107,6 +134,19 @@ impl<T> PoolConfiguration<T> {
     }
     
     /// Enable circuit breaker
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use objectpool::PoolConfiguration;
+    /// use std::time::Duration;
+    ///
+    /// let config = PoolConfiguration::<i32>::new()
+    ///     .with_circuit_breaker(5, Duration::from_secs(60));
+    ///
+    /// assert!(config.enable_circuit_breaker);
+    /// assert_eq!(config.circuit_breaker_threshold, 5);
+    /// ```
     pub fn with_circuit_breaker(mut self, threshold: usize, timeout: Duration) -> Self {
         self.enable_circuit_breaker = true;
         self.circuit_breaker_threshold = threshold;

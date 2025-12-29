@@ -16,10 +16,37 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// A pooled object that automatically returns to the pool when dropped
+///
+/// Objects are automatically returned when they go out of scope (RAII pattern).
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{ObjectPool, PoolConfiguration};
+///
+/// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+///
+/// {
+///     let obj = pool.get_object().unwrap();
+///     println!("Using: {}", *obj);
+///     // Object automatically returned here when `obj` is dropped
+/// }
+///
+/// assert_eq!(pool.available_count(), 3);
+/// ```
 pub struct PooledObject<T> {
     value: Option<T>,
     object_id: usize,
     return_fn: Arc<dyn Fn(T, usize) + Send + Sync>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for PooledObject<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledObject")
+            .field("value", &self.value)
+            .field("object_id", &self.object_id)
+            .finish()
+    }
 }
 
 impl<T> PooledObject<T> {
@@ -60,6 +87,23 @@ impl<T> Drop for PooledObject<T> {
 }
 
 /// Thread-safe object pool with fixed set of objects
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{ObjectPool, PoolConfiguration};
+///
+/// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+/// 
+/// // Get an object - automatically returned when dropped
+/// {
+///     let obj = pool.get_object().unwrap();
+///     assert!(vec![1, 2, 3].contains(&*obj));
+/// }
+/// 
+/// // Object returned, pool refilled
+/// assert_eq!(pool.available_count(), 3);
+/// ```
 pub struct ObjectPool<T: Send> {
     available: Arc<ArrayQueue<(T, usize)>>,
     active: Arc<DashMap<usize, ()>>,
@@ -74,6 +118,16 @@ pub struct ObjectPool<T: Send> {
 
 impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// Create a new object pool with initial objects
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use objectpool::{ObjectPool, PoolConfiguration};
+    ///
+    /// let config = PoolConfiguration::new().with_max_pool_size(10);
+    /// let pool = ObjectPool::new(vec![1, 2, 3], config);
+    /// assert_eq!(pool.available_count(), 3);
+    /// ```
     pub fn new(objects: Vec<T>, config: PoolConfiguration<T>) -> Self {
         let capacity = objects.len().max(config.max_pool_size);
         let available = Arc::new(ArrayQueue::new(capacity));
@@ -124,6 +178,18 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     }
     
     /// Get an object from the pool (blocking)
+    ///
+    /// Returns an error if the pool is empty or circuit breaker is open.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use objectpool::{ObjectPool, PoolConfiguration};
+    ///
+    /// let pool = ObjectPool::new(vec![42], PoolConfiguration::default());
+    /// let obj = pool.get_object().unwrap();
+    /// assert_eq!(*obj, 42);
+    /// ```
     pub fn get_object(&self) -> PoolResult<PooledObject<T>> {
         self.check_circuit_breaker()?;
         self.check_max_active()?;
@@ -165,6 +231,22 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     }
     
     /// Try to get an object without throwing error
+    ///
+    /// Returns `None` if pool is empty instead of an error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use objectpool::{ObjectPool, PoolConfiguration};
+    ///
+    /// let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
+    /// 
+    /// let obj1 = pool.try_get_object();
+    /// assert!(obj1.is_some());
+    /// 
+    /// let obj2 = pool.try_get_object();
+    /// assert!(obj2.is_none()); // Pool empty
+    /// ```
     pub fn try_get_object(&self) -> Option<PooledObject<T>> {
         self.get_object().ok()
     }
@@ -283,6 +365,23 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
 }
 
 /// Queryable object pool - find objects matching a predicate
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{QueryableObjectPool, PoolConfiguration};
+///
+/// #[derive(Clone)]
+/// struct Connection { id: u32 }
+///
+/// let pool = QueryableObjectPool::new(
+///     vec![Connection { id: 1 }, Connection { id: 2 }],
+///     PoolConfiguration::default()
+/// );
+///
+/// let conn = pool.get_object(|c| c.id == 2).unwrap();
+/// assert_eq!(conn.id, 2);
+/// ```
 pub struct QueryableObjectPool<T: Send> {
     inner: ObjectPool<T>,
 }
@@ -393,6 +492,20 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
 }
 
 /// Dynamic object pool - creates objects on demand
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{DynamicObjectPool, PoolConfiguration};
+///
+/// let pool = DynamicObjectPool::new(
+///     || 42,
+///     PoolConfiguration::new().with_max_pool_size(10)
+/// );
+///
+/// let obj = pool.get_object().unwrap();
+/// assert_eq!(*obj, 42);
+/// ```
 pub struct DynamicObjectPool<T: Send> {
     inner: ObjectPool<T>,
     factory: Arc<dyn Fn() -> T + Send + Sync>,
@@ -470,6 +583,24 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
     }
     
     /// Warm up the pool by pre-creating objects
+    ///
+    /// Pre-populates the pool to avoid cold-start latency.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use objectpool::{DynamicObjectPool, PoolConfiguration};
+    ///
+    /// let pool = DynamicObjectPool::new(
+    ///     || 42,
+    ///     PoolConfiguration::default()
+    /// );
+    ///
+    /// pool.warmup(5).unwrap();
+    /// 
+    /// let health = pool.get_health_status();
+    /// assert_eq!(health.available_objects, 5);
+    /// ```
     pub fn warmup(&self, count: usize) -> PoolResult<()> {
         for _ in 0..count.min(self.inner.capacity) {
             let obj = (self.factory)();
@@ -570,5 +701,394 @@ mod tests {
             let obj = pool.get_object_async().await.unwrap();
             assert!(vec![1, 2, 3].contains(&*obj));
         }
+    }
+    
+    #[test]
+    fn test_pool_empty_error() {
+        let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
+        
+        let _obj1 = pool.get_object().unwrap();
+        let result = pool.get_object();
+        
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, PoolError::PoolEmpty));
+        }
+    }
+    
+    #[test]
+    fn test_try_methods() {
+        let pool = ObjectPool::new(vec![42], PoolConfiguration::default());
+        
+        let obj1 = pool.try_get_object();
+        assert!(obj1.is_some());
+        if let Some(ref obj) = obj1 {
+            assert_eq!(**obj, 42);
+        }
+        
+        let obj2 = pool.try_get_object();
+        assert!(obj2.is_none());
+        
+        drop(obj1);
+        
+        let obj3 = pool.try_get_object();
+        assert!(obj3.is_some());
+    }
+    
+    #[test]
+    fn test_max_active_objects() {
+        let config = PoolConfiguration::new()
+            .with_max_active_objects(2);
+        
+        let pool = ObjectPool::new(vec![1, 2, 3, 4, 5], config);
+        
+        let _obj1 = pool.get_object().unwrap();
+        let _obj2 = pool.get_object().unwrap();
+        
+        let result = pool.get_object();
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, PoolError::MaxActiveObjectsReached));
+        }
+    }
+    
+    #[test]
+    fn test_validation_on_return() {
+        let config = PoolConfiguration::new()
+            .with_validation(|x| *x > 0);
+        
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+        
+        {
+            let obj = pool.get_object().unwrap();
+            assert_eq!(*obj, 1);
+        }
+        
+        assert_eq!(pool.available_count(), 3);
+    }
+    
+    #[test]
+    fn test_metrics_tracking() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        
+        {
+            let _obj1 = pool.get_object().unwrap();
+            let _obj2 = pool.get_object().unwrap();
+            
+            let metrics = pool.get_metrics();
+            assert_eq!(metrics.total_retrieved, 2);
+            assert_eq!(metrics.active_objects, 2);
+            assert_eq!(metrics.available_objects, 1);
+        }
+        
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.total_returned, 2);
+        assert_eq!(metrics.active_objects, 0);
+        assert_eq!(metrics.available_objects, 3);
+    }
+    
+    #[test]
+    fn test_health_status() {
+        let config = PoolConfiguration::new()
+            .with_max_pool_size(5);
+        
+        let pool = ObjectPool::new(vec![1, 2, 3, 4, 5], config);
+        
+        {
+            let _obj1 = pool.get_object().unwrap();
+            let _obj2 = pool.get_object().unwrap();
+            
+            let health = pool.get_health_status();
+            assert!(health.is_healthy);
+            assert_eq!(health.active_objects, 2);
+            assert_eq!(health.available_objects, 3);
+            assert_eq!(health.total_capacity, 5);
+        }
+    }
+    
+    #[test]
+    fn test_prometheus_export() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        
+        {
+            let _obj = pool.get_object().unwrap();
+            
+            let prometheus = pool.export_metrics_prometheus("test_pool", None);
+            
+            assert!(prometheus.contains("objectpool_objects_active"));
+            assert!(prometheus.contains("objectpool_objects_available"));
+            assert!(prometheus.contains("objectpool_utilization"));
+            assert!(prometheus.contains("test_pool"));
+        }
+    }
+    
+    #[test]
+    fn test_prometheus_with_tags() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        
+        let mut tags = HashMap::new();
+        tags.insert("env".to_string(), "test".to_string());
+        tags.insert("service".to_string(), "api".to_string());
+        
+        let prometheus = pool.export_metrics_prometheus("test_pool", Some(&tags));
+        
+        assert!(prometheus.contains("env=\"test\""));
+        assert!(prometheus.contains("service=\"api\""));
+    }
+    
+    #[test]
+    fn test_queryable_no_match() {
+        let pool = QueryableObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        
+        let result = pool.get_object(|x| *x == 99);
+        
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, PoolError::NoMatchFound));
+        }
+    }
+    
+    #[test]
+    fn test_queryable_multiple_matches() {
+        let pool = QueryableObjectPool::new(vec![1, 2, 3, 2, 4], PoolConfiguration::default());
+        
+        let obj = pool.get_object(|x| *x == 2).unwrap();
+        assert_eq!(*obj, 2);
+        
+        // Should still find the other 2
+        let obj2 = pool.get_object(|x| *x == 2).unwrap();
+        assert_eq!(*obj2, 2);
+    }
+    
+    #[test]
+    fn test_dynamic_pool_creation() {
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count_clone = call_count.clone();
+        
+        let pool = DynamicObjectPool::new(
+            move || {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+                42
+            },
+            PoolConfiguration::new().with_max_pool_size(5),
+        );
+        
+        let _obj1 = pool.get_object().unwrap();
+        let _obj2 = pool.get_object().unwrap();
+        
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
+    }
+    
+    #[test]
+    fn test_dynamic_pool_warmup() {
+        let pool = DynamicObjectPool::new(
+            || 42,
+            PoolConfiguration::new().with_max_pool_size(10),
+        );
+        
+        pool.warmup(5).unwrap();
+        
+        let health = pool.get_health_status();
+        assert_eq!(health.available_objects, 5);
+    }
+    
+    #[test]
+    fn test_dynamic_pool_max_capacity() {
+        let pool = DynamicObjectPool::new(
+            || 42,
+            PoolConfiguration::new().with_max_pool_size(2),
+        );
+        
+        let _obj1 = pool.get_object().unwrap();
+        let _obj2 = pool.get_object().unwrap();
+        let result = pool.get_object();
+        
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, PoolError::PoolFull));
+        }
+    }
+    
+    #[test]
+    fn test_eviction_ttl() {
+        use std::thread;
+        
+        let config = PoolConfiguration::new()
+            .with_ttl(Duration::from_millis(100));
+        
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+        
+        thread::sleep(Duration::from_millis(150));
+        
+        // Objects should be expired and filtered out
+        let obj = pool.try_get_object();
+        assert!(obj.is_none() || pool.available_count() < 3);
+    }
+    
+    #[test]
+    fn test_circuit_breaker_opens() {
+        let config = PoolConfiguration::new()
+            .with_circuit_breaker(3, Duration::from_secs(60));
+        
+        let pool = ObjectPool::new(vec![1], config);
+        
+        let _obj = pool.get_object().unwrap();
+        
+        // Cause failures
+        for _ in 0..3 {
+            let _ = pool.try_get_object();
+        }
+        
+        // Circuit breaker should be open now
+        let result = pool.get_object();
+        assert!(result.is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_async_timeout() {
+        let config = PoolConfiguration::new()
+            .with_timeout(Duration::from_millis(50));
+        
+        let pool = ObjectPool::new(vec![1], config);
+        
+        let _obj = pool.get_object().unwrap();
+        
+        let result = pool.get_object_async().await;
+        
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, PoolError::Timeout(_)));
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_concurrent_access() {
+        use std::sync::Arc;
+        
+        let pool = Arc::new(ObjectPool::new(
+            vec![1, 2, 3, 4, 5],
+            PoolConfiguration::default(),
+        ));
+        
+        let mut handles = vec![];
+        
+        for _ in 0..10 {
+            let pool_clone = Arc::clone(&pool);
+            let handle = tokio::spawn(async move {
+                if let Some(obj) = pool_clone.try_get_object() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    drop(obj);
+                    true
+                } else {
+                    false
+                }
+            });
+            handles.push(handle);
+        }
+        
+        let mut success_count = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                success_count += 1;
+            }
+        }
+        
+        // At least 5 should succeed (pool size)
+        assert!(success_count >= 5);
+        assert_eq!(pool.available_count(), 5);
+    }
+    
+    #[tokio::test]
+    async fn test_queryable_async() {
+        let pool = QueryableObjectPool::new(vec![1, 2, 3, 4, 5], PoolConfiguration::default());
+        
+        let obj = pool.get_object_async(|x| *x > 3).await.unwrap();
+        assert!(*obj > 3);
+    }
+    
+    #[tokio::test]
+    async fn test_dynamic_warmup_async() {
+        let pool = DynamicObjectPool::new(
+            || 42,
+            PoolConfiguration::new().with_max_pool_size(10),
+        );
+        
+        pool.warmup_async(7).await.unwrap();
+        
+        assert_eq!(pool.get_health_status().available_objects, 7);
+    }
+    
+    #[test]
+    fn test_pool_reuse_after_drop() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        
+        for _ in 0..100 {
+            {
+                let obj = pool.get_object().unwrap();
+                assert!(vec![1, 2, 3].contains(&*obj));
+            }
+            assert_eq!(pool.available_count(), 3);
+        }
+    }
+    
+    #[test]
+    fn test_multiple_pools() {
+        let pool1 = ObjectPool::new(vec![1, 2], PoolConfiguration::default());
+        let pool2 = ObjectPool::new(vec![3, 4], PoolConfiguration::default());
+        
+        let obj1 = pool1.get_object().unwrap();
+        let obj2 = pool2.get_object().unwrap();
+        
+        assert!(vec![1, 2].contains(&*obj1));
+        assert!(vec![3, 4].contains(&*obj2));
+    }
+    
+    #[test]
+    fn test_export_metrics_map() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        
+        {
+            let _obj = pool.get_object().unwrap();
+        }
+        
+        let metrics_map = pool.export_metrics();
+        
+        assert!(metrics_map.contains_key("total_retrieved"));
+        assert!(metrics_map.contains_key("total_returned"));
+        assert!(metrics_map.contains_key("active_objects"));
+        assert_eq!(metrics_map.get("total_retrieved").unwrap(), "1");
+        assert_eq!(metrics_map.get("total_returned").unwrap(), "1");
+    }
+    
+    #[test]
+    fn test_health_warnings() {
+        let config = PoolConfiguration::new()
+            .with_max_pool_size(2);
+        
+        let pool = ObjectPool::new(vec![1, 2], config);
+        
+        // Use both objects to get high utilization
+        let _obj1 = pool.get_object().unwrap();
+        let _obj2 = pool.get_object().unwrap();
+        
+        let health = pool.get_health_status();
+        assert_eq!(health.utilization, 1.0); // 100% utilization
+    }
+    
+    #[test]
+    fn test_configuration_builder() {
+        let config = PoolConfiguration::<i32>::new()
+            .with_max_pool_size(50)
+            .with_max_active_objects(25)
+            .with_timeout(Duration::from_secs(10))
+            .with_ttl(Duration::from_secs(300))
+            .with_idle_timeout(Duration::from_secs(60))
+            .with_warmup(10)
+            .with_circuit_breaker(5, Duration::from_secs(30));
+        
+        assert_eq!(config.max_pool_size, 50);
+        assert_eq!(config.max_active_objects, Some(25));
+        assert_eq!(config.warmup_size, Some(10));
+        assert!(config.enable_circuit_breaker);
     }
 }

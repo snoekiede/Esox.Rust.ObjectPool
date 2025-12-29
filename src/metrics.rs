@@ -5,6 +5,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Metrics data for a pool
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{ObjectPool, PoolConfiguration};
+///
+/// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+///
+/// {
+///     let _obj = pool.get_object().unwrap();
+///     let metrics = pool.get_metrics();
+///     assert_eq!(metrics.total_retrieved, 1);
+///     assert_eq!(metrics.active_objects, 1);
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct PoolMetrics {
     /// Total objects retrieved from pool
@@ -53,6 +68,22 @@ pub struct MetricsExporter;
 
 impl MetricsExporter {
     /// Export metrics in Prometheus exposition format
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use objectpool::{ObjectPool, PoolConfiguration};
+    /// use std::collections::HashMap;
+    ///
+    /// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+    ///
+    /// let mut tags = HashMap::new();
+    /// tags.insert("service".to_string(), "api".to_string());
+    ///
+    /// let output = pool.export_metrics_prometheus("my_pool", Some(&tags));
+    /// assert!(output.contains("objectpool_objects_active"));
+    /// assert!(output.contains("service=\"api\""));
+    /// ```
     pub fn export_prometheus(
         metrics: &PoolMetrics,
         pool_name: &str,

@@ -5,6 +5,20 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 
 /// Eviction policy for pool objects
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{ObjectPool, PoolConfiguration};
+/// use std::time::Duration;
+///
+/// // Create pool with TTL eviction
+/// let config = PoolConfiguration::new()
+///     .with_ttl(Duration::from_secs(3600));
+///
+/// let pool = ObjectPool::new(vec![1, 2, 3], config);
+/// // Objects will be evicted after 1 hour
+/// ```
 #[derive(Debug, Clone)]
 pub enum EvictionPolicy {
     /// No eviction

@@ -5,6 +5,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Circuit breaker state
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{CircuitBreaker, CircuitBreakerState};
+/// use std::time::Duration;
+///
+/// let breaker = CircuitBreaker::new(3, Duration::from_secs(60));
+/// assert_eq!(breaker.state(), CircuitBreakerState::Closed);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitBreakerState {
     /// Circuit is closed - normal operation
@@ -18,6 +28,23 @@ pub enum CircuitBreakerState {
 }
 
 /// Circuit breaker for protecting against cascading failures
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::CircuitBreaker;
+/// use std::time::Duration;
+///
+/// let breaker = CircuitBreaker::new(3, Duration::from_secs(60));
+///
+/// // Record failures
+/// breaker.record_failure();
+/// breaker.record_failure();
+/// breaker.record_failure();
+///
+/// // Circuit should be open after threshold
+/// assert!(!breaker.allow_request());
+/// ```
 pub struct CircuitBreaker {
     state: Arc<Mutex<CircuitBreakerState>>,
     failure_count: Arc<AtomicUsize>,

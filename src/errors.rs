@@ -1,4 +1,17 @@
 //! Error types for the object pool
+//!
+//! # Examples
+//!
+//! ```
+//! use objectpool::{ObjectPool, PoolConfiguration, PoolError};
+//!
+//! let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
+//! let _obj = pool.get_object().unwrap();
+//!
+//! // Pool is now empty
+//! let result = pool.get_object();
+//! assert!(matches!(result, Err(PoolError::PoolEmpty)));
+//! ```
 
 use thiserror::Error;
 

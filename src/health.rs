@@ -4,6 +4,18 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Health status of an object pool
+///
+/// # Examples
+///
+/// ```
+/// use objectpool::{ObjectPool, PoolConfiguration};
+///
+/// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+///
+/// let health = pool.get_health_status();
+/// assert!(health.is_healthy());
+/// assert_eq!(health.available_objects, 3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct HealthStatus {
     /// Whether the pool is healthy
