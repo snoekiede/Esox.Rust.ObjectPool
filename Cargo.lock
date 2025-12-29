@@ -251,6 +251,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "esox_objectpool"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "criterion",
+ "crossbeam",
+ "dashmap",
+ "parking_lot",
+ "prometheus",
+ "serde",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -360,21 +375,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "objectpool"
-version = "1.0.0"
-dependencies = [
- "async-trait",
- "criterion",
- "crossbeam",
- "dashmap",
- "parking_lot",
- "prometheus",
- "serde",
- "thiserror 2.0.17",
- "tokio",
 ]
 
 [[package]]
