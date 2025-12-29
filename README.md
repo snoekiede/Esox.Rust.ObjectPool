@@ -331,7 +331,7 @@ cargo test --release  # With optimizations
 
 ## Version History
 
-### 4.0.0 (Current) - December 2025
+### 1.0.0 (Current) - December 2025
 - **Initial Rust port** from .NET EsoxSolutions.ObjectPool v4.0.0
 - Thread-safe pooling with lock-free operations
 - Async support with tokio
