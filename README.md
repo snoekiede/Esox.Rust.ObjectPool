@@ -386,7 +386,9 @@ Contributions welcome! Please ensure:
 
 ## License
 
-MIT License - See LICENSE file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+Copyright (c) 2025 EsoxSolutions
 
 ## Credits
 
@@ -400,4 +402,15 @@ For questions or issues: [info@esoxsolutions.nl](mailto:info@esoxsolutions.nl)
 
 ## Disclaimer
 
-**Use of this software is at your own risk. The author(s) are not liable for any damages, losses, or other consequences resulting from the use, misuse, or inability to use this software.**
+**THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.**
+
+This library is provided as-is, without any guarantees or warranty. The authors and contributors are not responsible for any damage, data loss, or other issues that may arise from using this software in any capacity. Users assume all risks associated with the use of this library.
+
+By using this software, you acknowledge and agree that:
+- You use this software at your own risk
+- The authors are not liable for any damages, losses, or other consequences
+- No warranty is provided regarding the software's performance, reliability, or suitability
+- You are responsible for testing and validating the software for your specific use case
+- This software may not be suitable for mission-critical or safety-critical applications
+
+For production use, please conduct thorough testing and validation in your specific environment.
