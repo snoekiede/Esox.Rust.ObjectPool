@@ -81,6 +81,7 @@ impl HealthStatus {
 }
 
 /// Internal health tracker for pools
+#[allow(dead_code)]
 pub(crate) struct HealthTracker {
     pub total_retrieved: Arc<AtomicUsize>,
     pub total_returned: Arc<AtomicUsize>,
@@ -112,10 +113,12 @@ impl HealthTracker {
         self.pool_empty_count.fetch_add(1, Ordering::Relaxed);
     }
     
+    #[allow(dead_code)]
     pub fn increment_validation_failure(&self) {
         self.validation_failures.fetch_add(1, Ordering::Relaxed);
     }
     
+    #[allow(dead_code)]
     pub fn set_health(&self, healthy: bool) {
         self.is_healthy.store(healthy, Ordering::Relaxed);
     }

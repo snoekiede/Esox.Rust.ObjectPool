@@ -317,19 +317,19 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     }
     
     fn check_circuit_breaker(&self) -> PoolResult<()> {
-        if let Some(ref cb) = self.circuit_breaker {
-            if !cb.allow_request() {
-                return Err(PoolError::CircuitBreakerOpen);
-            }
+        if let Some(ref cb) = self.circuit_breaker
+            && !cb.allow_request()
+        {
+            return Err(PoolError::CircuitBreakerOpen);
         }
         Ok(())
     }
     
     fn check_max_active(&self) -> PoolResult<()> {
-        if let Some(max) = self.config.max_active_objects {
-            if self.active.len() >= max {
-                return Err(PoolError::MaxActiveObjectsReached);
-            }
+        if let Some(max) = self.config.max_active_objects
+            && self.active.len() >= max
+        {
+            return Err(PoolError::MaxActiveObjectsReached);
         }
         Ok(())
     }
@@ -344,15 +344,14 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         
         Arc::new(move |obj, id| {
             // Validate if configured
-            if config.validate_on_return {
-                if let Some(validate) = config.validation_function {
-                    if !validate(&obj) {
-                        metrics.validation_failures.fetch_add(1, Ordering::Relaxed);
-                        active.remove(&id);
-                        eviction.remove_object(id);
-                        return;
-                    }
-                }
+            if config.validate_on_return
+                && let Some(validate) = config.validation_function
+                && !validate(&obj)
+            {
+                metrics.validation_failures.fetch_add(1, Ordering::Relaxed);
+                active.remove(&id);
+                eviction.remove_object(id);
+                return;
             }
             
             eviction.touch_object(id);

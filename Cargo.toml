@@ -1,12 +1,20 @@
 [package]
 name = "objectpool"
 version = "1.0.0"
-edition = "2021"
-authors = ["Rust Port <info@esoxsolutions.nl>"]
+edition = "2024"
+authors = ["Iede Snoek <info@esoxsolutions.nl>"]
 description = "High-performance, thread-safe object pool with async support, metrics, and advanced features"
+documentation="https://docs.rs/objectpool"
+homepage="https://github.com/snoekiede/Esox.Rust.ObjectPool"
+repository="https://github.com/snoekiede/Esox.Rust.ObjectPool"
 license = "MIT"
 keywords = ["pool", "object-pool", "async", "threading", "performance"]
 categories = ["concurrency", "asynchronous", "caching"]
+exclude=[
+    ".github/*",
+    "examples/*",
+    "tests/*",
+]
 
 [dependencies]
 tokio = { version = "1.42", features = ["full"] }

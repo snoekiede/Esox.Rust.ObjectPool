@@ -19,9 +19,10 @@ use std::collections::HashMap;
 /// let pool = ObjectPool::new(vec![1, 2, 3], config);
 /// // Objects will be evicted after 1 hour
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum EvictionPolicy {
     /// No eviction
+    #[default]
     None,
     
     /// Time-to-live: objects expire after a fixed duration
@@ -35,12 +36,6 @@ pub enum EvictionPolicy {
         ttl: Duration,
         idle_timeout: Duration,
     },
-}
-
-impl Default for EvictionPolicy {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Metadata for tracking object lifecycle
@@ -129,6 +124,7 @@ impl<T> EvictionTracker<T> {
         metadata.remove(&id);
     }
     
+    #[allow(dead_code)]
     pub fn get_expired_objects(&self) -> Vec<usize> {
         if matches!(self.policy, EvictionPolicy::None) {
             return Vec::new();

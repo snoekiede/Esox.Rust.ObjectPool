@@ -81,12 +81,12 @@ impl CircuitBreaker {
             CircuitBreakerState::Open => {
                 // Check if timeout has elapsed
                 let last_failure = self.last_failure_time.lock().unwrap();
-                if let Some(time) = *last_failure {
-                    if time.elapsed() > self.timeout {
-                        drop(last_failure);
-                        self.transition_to_half_open();
-                        return true;
-                    }
+                if let Some(time) = *last_failure
+                    && time.elapsed() > self.timeout
+                {
+                    drop(last_failure);
+                    self.transition_to_half_open();
+                    return true;
                 }
                 false
             }
