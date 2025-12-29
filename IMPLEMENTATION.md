@@ -2,7 +2,7 @@
 
 ## Rust Port of EsoxSolutions.ObjectPool
 
-This is a faithful port of the .NET EsoxSolutions.ObjectPool v4.0.0 library to Rust, maintaining the core functionality while adapting to Rust's ownership model and idioms.
+This is a faithful port of the .NET EsoxSolutions.ObjectPool v1.0.0 library to Rust, maintaining the core functionality while adapting to Rust's ownership model and idioms.
 
 ## Architecture
 
@@ -55,27 +55,6 @@ Rust's type system provides:
 3. **Resource safety** - Drop trait ensures cleanup
 4. **Panic safety** - Unwinding ensures cleanup even on panic
 
-### Missing Features (Intentional)
-
-These .NET-specific features are not included:
-
-1. **Dependency Injection** - Not idiomatic in Rust
-   - Use builder pattern instead
-   - Factory functions with closures
-   - Trait-based design
-
-2. **ASP.NET Core Health Checks** - No equivalent framework
-   - Export metrics via HTTP endpoint
-   - Integrate with actix-web, axum, etc.
-
-3. **Built-in OpenTelemetry** - Available via separate crates
-   - Use `opentelemetry` crate
-   - Prometheus exporter included
-
-4. **Attribute-based configuration** - Not applicable
-   - Use builder pattern
-   - TOML/JSON configuration files
-
 ### Future Enhancements
 
 Potential additions for v5.0:
@@ -120,4 +99,4 @@ When contributing:
 
 ### License
 
-MIT License - Same as original .NET library
+MIT License

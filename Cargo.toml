@@ -1,6 +1,6 @@
 [package]
 name = "objectpool"
-version = "4.0.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Rust Port <info@esoxsolutions.nl>"]
 description = "High-performance, thread-safe object pool with async support, metrics, and advanced features"

@@ -177,14 +177,6 @@ cargo doc --open
 
 All examples appear in the generated HTML documentation and are clickable, testable, and guaranteed to work.
 
-## Comparison with Other Libraries
-
-| Library | Unit Tests | Doc Tests | Total |
-|---------|------------|-----------|-------|
-| objectpool (ours) | 28 | 19 | **47** |
-| crossbeam | 100+ | 50+ | 150+ |
-| tokio | 1000+ | 200+ | 1200+ |
-| serde | 500+ | 100+ | 600+ |
 
 **We have strong doc test coverage relative to codebase size.**
 
