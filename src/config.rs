@@ -7,7 +7,7 @@ use std::time::Duration;
 /// # Examples
 ///
 /// ```
-/// use objectpool::PoolConfiguration;
+/// use esox_objectpool::PoolConfiguration;
 /// use std::time::Duration;
 ///
 /// let config = PoolConfiguration::<i32>::new()
@@ -84,7 +84,7 @@ impl<T> PoolConfiguration<T> {
     /// # Examples
     ///
     /// ```
-    /// use objectpool::PoolConfiguration;
+    /// use esox_objectpool::PoolConfiguration;
     ///
     /// let config = PoolConfiguration::<i32>::new()
     ///     .with_max_pool_size(50);
@@ -138,7 +138,7 @@ impl<T> PoolConfiguration<T> {
     /// # Examples
     ///
     /// ```
-    /// use objectpool::PoolConfiguration;
+    /// use esox_objectpool::PoolConfiguration;
     /// use std::time::Duration;
     ///
     /// let config = PoolConfiguration::<i32>::new()

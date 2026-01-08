@@ -20,7 +20,7 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use objectpool::ObjectPool;
+//! use esox_objectpool::ObjectPool;
 //!
 //! let pool = ObjectPool::new(vec![1, 2, 3], Default::default());
 //! {

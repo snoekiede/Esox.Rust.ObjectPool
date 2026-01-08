@@ -1,6 +1,6 @@
 //! Async usage examples
 
-use objectpool::{ObjectPool, DynamicObjectPool, PoolConfiguration};
+use esox_objectpool::{ObjectPool, DynamicObjectPool, PoolConfiguration};
 use std::time::Duration;
 use tokio::time::sleep;
 

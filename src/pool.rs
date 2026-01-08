@@ -22,7 +22,7 @@ use std::time::Duration;
 /// # Examples
 ///
 /// ```
-/// use objectpool::{ObjectPool, PoolConfiguration};
+/// use esox_objectpool::{ObjectPool, PoolConfiguration};
 ///
 /// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
 ///
@@ -91,7 +91,7 @@ impl<T> Drop for PooledObject<T> {
 /// # Examples
 ///
 /// ```
-/// use objectpool::{ObjectPool, PoolConfiguration};
+/// use esox_objectpool::{ObjectPool, PoolConfiguration};
 ///
 /// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
 /// 
@@ -122,7 +122,7 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// # Examples
     ///
     /// ```
-    /// use objectpool::{ObjectPool, PoolConfiguration};
+    /// use esox_objectpool::{ObjectPool, PoolConfiguration};
     ///
     /// let config = PoolConfiguration::new().with_max_pool_size(10);
     /// let pool = ObjectPool::new(vec![1, 2, 3], config);
@@ -184,7 +184,7 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// # Examples
     ///
     /// ```
-    /// use objectpool::{ObjectPool, PoolConfiguration};
+    /// use esox_objectpool::{ObjectPool, PoolConfiguration};
     ///
     /// let pool = ObjectPool::new(vec![42], PoolConfiguration::default());
     /// let obj = pool.get_object().unwrap();
@@ -237,7 +237,7 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// # Examples
     ///
     /// ```
-    /// use objectpool::{ObjectPool, PoolConfiguration};
+    /// use esox_objectpool::{ObjectPool, PoolConfiguration};
     ///
     /// let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
     /// 
@@ -368,7 +368,7 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
 /// # Examples
 ///
 /// ```
-/// use objectpool::{QueryableObjectPool, PoolConfiguration};
+/// use esox_objectpool::{QueryableObjectPool, PoolConfiguration};
 ///
 /// #[derive(Clone)]
 /// struct Connection { id: u32 }
@@ -495,7 +495,7 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
 /// # Examples
 ///
 /// ```
-/// use objectpool::{DynamicObjectPool, PoolConfiguration};
+/// use esox_objectpool::{DynamicObjectPool, PoolConfiguration};
 ///
 /// let pool = DynamicObjectPool::new(
 ///     || 42,
@@ -588,7 +588,7 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
     /// # Examples
     ///
     /// ```
-    /// use objectpool::{DynamicObjectPool, PoolConfiguration};
+    /// use esox_objectpool::{DynamicObjectPool, PoolConfiguration};
     ///
     /// let pool = DynamicObjectPool::new(
     ///     || 42,

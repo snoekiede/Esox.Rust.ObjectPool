@@ -9,7 +9,7 @@ use std::collections::HashMap;
 /// # Examples
 ///
 /// ```
-/// use objectpool::{ObjectPool, PoolConfiguration};
+/// use esox_objectpool::{ObjectPool, PoolConfiguration};
 /// use std::time::Duration;
 ///
 /// // Create pool with TTL eviction

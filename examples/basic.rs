@@ -1,6 +1,6 @@
 //! Basic usage examples for ObjectPool
 
-use objectpool::{ObjectPool, PoolConfiguration};
+use esox_objectpool::{ObjectPool, PoolConfiguration};
 
 fn main() {
     println!("=== EsoxSolutions.ObjectPool - Basic Examples ===\n");

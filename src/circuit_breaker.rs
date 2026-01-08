@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 /// # Examples
 ///
 /// ```
-/// use objectpool::{CircuitBreaker, CircuitBreakerState};
+/// use esox_objectpool::{CircuitBreaker, CircuitBreakerState};
 /// use std::time::Duration;
 ///
 /// let breaker = CircuitBreaker::new(3, Duration::from_secs(60));
@@ -32,7 +32,7 @@ pub enum CircuitBreakerState {
 /// # Examples
 ///
 /// ```
-/// use objectpool::CircuitBreaker;
+/// use esox_objectpool::CircuitBreaker;
 /// use std::time::Duration;
 ///
 /// let breaker = CircuitBreaker::new(3, Duration::from_secs(60));

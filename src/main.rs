@@ -5,7 +5,7 @@
 // This is just a binary wrapper - the actual library is in lib.rs
 // Run examples with: cargo run --example basic
 
-use objectpool::{ObjectPool, PoolConfiguration};
+use esox_objectpool::{ObjectPool, PoolConfiguration};
 
 fn main() {
     println!("=== EsoxSolutions.ObjectPool v4.0.0 ===");

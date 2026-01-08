@@ -8,7 +8,7 @@ use std::sync::Arc;
 /// # Examples
 ///
 /// ```
-/// use objectpool::{ObjectPool, PoolConfiguration};
+/// use esox_objectpool::{ObjectPool, PoolConfiguration};
 ///
 /// let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
 ///

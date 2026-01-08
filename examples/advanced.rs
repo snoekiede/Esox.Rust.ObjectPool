@@ -1,6 +1,6 @@
 //! Advanced features: eviction, circuit breaker, queryable pools
 
-use objectpool::{
+use esox_objectpool::{
     ObjectPool, QueryableObjectPool, DynamicObjectPool, 
     PoolConfiguration, CircuitBreaker
 };

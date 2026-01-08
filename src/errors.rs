@@ -3,7 +3,7 @@
 //! # Examples
 //!
 //! ```
-//! use objectpool::{ObjectPool, PoolConfiguration, PoolError};
+//! use esox_objectpool::{ObjectPool, PoolConfiguration, PoolError};
 //!
 //! let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
 //! let _obj = pool.get_object().unwrap();
