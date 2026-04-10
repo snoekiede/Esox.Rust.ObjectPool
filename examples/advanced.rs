@@ -2,7 +2,7 @@
 
 use esox_objectpool::{
     ObjectPool, QueryableObjectPool, DynamicObjectPool, 
-    PoolConfiguration, CircuitBreaker
+    PoolConfiguration
 };
 use std::time::Duration;
 use std::thread;
@@ -59,7 +59,7 @@ fn queryable_pool() {
     }
     
     // Try to find non-existent
-    let result = pool.try_get_object(|c| c.id == 99);
+    let result = pool.try_get_object(|c| c.id == 99).unwrap();
     println!("   Find ID 99: {}", if result.is_some() { "Found" } else { "Not found" });
     
     println!();
@@ -89,7 +89,7 @@ fn eviction_ttl() {
     thread::sleep(Duration::from_millis(1100));
     
     // Try to get object (expired ones will be filtered)
-    let obj = pool.try_get_object();
+    let obj = pool.try_get_object().unwrap();
     println!("   After timeout: {}", if obj.is_some() { "Got object" } else { "Object expired" });
     
     println!();
@@ -110,8 +110,9 @@ fn circuit_breaker_demo() {
     println!("   Attempting to get from empty pool...");
     for i in 0..5 {
         match pool.try_get_object() {
-            Some(_) => println!("   Attempt {}: Success", i + 1),
-            None => println!("   Attempt {}: Failed", i + 1),
+            Ok(Some(_)) => println!("   Attempt {}: Success", i + 1),
+            Ok(None) => println!("   Attempt {}: Failed", i + 1),
+            Err(e) => println!("   Attempt {}: Error ({})", i + 1, e),
         }
     }
     

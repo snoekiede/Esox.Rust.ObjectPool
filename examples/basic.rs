@@ -56,19 +56,19 @@ fn try_methods() {
     let pool = ObjectPool::new(vec![42], PoolConfiguration::default());
     
     // Get the only object
-    let obj1 = pool.try_get_object();
+    let obj1 = pool.try_get_object().unwrap();
     assert!(obj1.is_some());
     println!("   First try: Success");
     
     // Try again while object is checked out
-    let obj2 = pool.try_get_object();
+    let obj2 = pool.try_get_object().unwrap();
     assert!(obj2.is_none());
     println!("   Second try: None (pool empty)");
     
     drop(obj1); // Return object
     
     // Try again after return
-    let obj3 = pool.try_get_object();
+    let obj3 = pool.try_get_object().unwrap();
     assert!(obj3.is_some());
     println!("   Third try: Success\n");
 }

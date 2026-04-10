@@ -91,11 +91,17 @@ async fn concurrent_access() {
     for i in 0..10 {
         let pool_clone = std::sync::Arc::clone(&pool);
         let handle = tokio::spawn(async move {
-            if let Some(obj) = pool_clone.try_get_object_async().await {
-                println!("   Task {} got object: {}", i, *obj);
-                sleep(Duration::from_millis(50)).await;
-            } else {
-                println!("   Task {} couldn't get object", i);
+            match pool_clone.try_get_object_async().await {
+                Ok(Some(obj)) => {
+                    println!("   Task {} got object: {}", i, *obj);
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Ok(None) => {
+                    println!("   Task {} couldn't get object", i);
+                }
+                Err(e) => {
+                    println!("   Task {} error: {}", i, e);
+                }
             }
         });
         handles.push(handle);

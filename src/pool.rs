@@ -239,9 +239,12 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         }
     }
     
-    /// Try to get an object without throwing error
+    /// Try to get an object without throwing an error for an empty pool
     ///
-    /// Returns `None` if pool is empty instead of an error.
+    /// Returns `Ok(None)` if pool is empty.
+    ///
+    /// Operational failures (for example circuit breaker or max-active limits)
+    /// are returned as errors.
     ///
     /// # Examples
     ///
@@ -250,14 +253,18 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     ///
     /// let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
     /// 
-    /// let obj1 = pool.try_get_object();
+    /// let obj1 = pool.try_get_object().unwrap();
     /// assert!(obj1.is_some());
     /// 
-    /// let obj2 = pool.try_get_object();
+    /// let obj2 = pool.try_get_object().unwrap();
     /// assert!(obj2.is_none()); // Pool empty
     /// ```
-    pub fn try_get_object(&self) -> Option<PooledObject<T>> {
-        self.get_object().ok()
+    pub fn try_get_object(&self) -> PoolResult<Option<PooledObject<T>>> {
+        match self.get_object() {
+            Ok(obj) => Ok(Some(obj)),
+            Err(PoolError::PoolEmpty) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
     
     /// Get an object asynchronously with timeout
@@ -267,10 +274,11 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         tokio::time::timeout(timeout, async {
             loop {
                 match self.try_get_object() {
-                    Some(obj) => return Ok(obj),
-                    None => {
+                    Ok(Some(obj)) => return Ok(obj),
+                    Ok(None) => {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                    Err(err) => return Err(err),
                 }
             }
         })
@@ -279,8 +287,8 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     }
     
     /// Try to get an object asynchronously
-    pub async fn try_get_object_async(&self) -> Option<PooledObject<T>> {
-        self.get_object_async().await.ok()
+    pub async fn try_get_object_async(&self) -> PoolResult<Option<PooledObject<T>>> {
+        self.try_get_object()
     }
     
     /// Get health status
@@ -464,11 +472,15 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
     }
     
     /// Try to get an object matching query
-    pub fn try_get_object<F>(&self, query: F) -> Option<PooledObject<T>>
+    pub fn try_get_object<F>(&self, query: F) -> PoolResult<Option<PooledObject<T>>>
     where
         F: Fn(&T) -> bool,
     {
-        self.get_object(query).ok()
+        match self.get_object(query) {
+            Ok(obj) => Ok(Some(obj)),
+            Err(PoolError::NoMatchFound) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
     
     /// Get an object matching query asynchronously
@@ -481,10 +493,11 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
         tokio::time::timeout(timeout, async {
             loop {
                 match self.try_get_object(&query) {
-                    Some(obj) => return Ok(obj),
-                    None => {
+                    Ok(Some(obj)) => return Ok(obj),
+                    Ok(None) => {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                    Err(err) => return Err(err),
                 }
             }
         })
@@ -556,9 +569,9 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
     
     /// Get an object, creating one if pool is empty
     pub fn get_object(&self) -> PoolResult<PooledObject<T>> {
-        match self.inner.try_get_object() {
-            Some(obj) => Ok(obj),
-            None => {
+        match self.inner.get_object() {
+            Ok(obj) => Ok(obj),
+            Err(PoolError::PoolEmpty) => {
                 // Create new object if under capacity
                 if self.inner.active.len() < self.inner.capacity {
                     let obj = (self.factory)();
@@ -576,12 +589,17 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
                     Err(PoolError::PoolFull)
                 }
             }
+            Err(err) => Err(err),
         }
     }
     
     /// Try to get an object
-    pub fn try_get_object(&self) -> Option<PooledObject<T>> {
-        self.get_object().ok()
+    pub fn try_get_object(&self) -> PoolResult<Option<PooledObject<T>>> {
+        match self.get_object() {
+            Ok(obj) => Ok(Some(obj)),
+            Err(PoolError::PoolFull) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
     
     /// Get an object asynchronously
@@ -591,10 +609,11 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
         tokio::time::timeout(timeout, async {
             loop {
                 match self.try_get_object() {
-                    Some(obj) => return Ok(obj),
-                    None => {
+                    Ok(Some(obj)) => return Ok(obj),
+                    Ok(None) => {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
+                    Err(err) => return Err(err),
                 }
             }
         })
@@ -740,18 +759,18 @@ mod tests {
     fn test_try_methods() {
         let pool = ObjectPool::new(vec![42], PoolConfiguration::default());
         
-        let obj1 = pool.try_get_object();
+        let obj1 = pool.try_get_object().unwrap();
         assert!(obj1.is_some());
         if let Some(ref obj) = obj1 {
             assert_eq!(**obj, 42);
         }
         
-        let obj2 = pool.try_get_object();
+        let obj2 = pool.try_get_object().unwrap();
         assert!(obj2.is_none());
         
         drop(obj1);
         
-        let obj3 = pool.try_get_object();
+        let obj3 = pool.try_get_object().unwrap();
         assert!(obj3.is_some());
     }
     
@@ -941,7 +960,7 @@ mod tests {
         thread::sleep(Duration::from_millis(150));
         
         // Objects should be expired and filtered out
-        let obj = pool.try_get_object();
+        let obj = pool.try_get_object().unwrap();
         assert!(obj.is_none() || pool.available_count() < 3);
     }
     
@@ -980,7 +999,48 @@ mod tests {
             assert!(matches!(e, PoolError::Timeout(_)));
         }
     }
-    
+
+    #[tokio::test]
+    async fn test_async_get_fails_fast_on_max_active() {
+        use std::time::Instant;
+
+        let config = PoolConfiguration::new()
+            .with_timeout(Duration::from_secs(2))
+            .with_max_active_objects(1);
+
+        let pool = ObjectPool::new(vec![1, 2], config);
+        let _obj = pool.get_object().unwrap();
+
+        let start = Instant::now();
+        let result = pool.get_object_async().await;
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(PoolError::MaxActiveObjectsReached)));
+        assert!(elapsed < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn test_async_get_fails_fast_on_circuit_breaker_open() {
+        use std::time::Instant;
+
+        let config = PoolConfiguration::new()
+            .with_timeout(Duration::from_secs(2))
+            .with_circuit_breaker(1, Duration::from_secs(60));
+
+        let pool = ObjectPool::new(vec![1], config);
+        let _obj = pool.get_object().unwrap();
+
+        // First empty attempt records failure and opens the breaker.
+        assert!(matches!(pool.try_get_object(), Ok(None)));
+
+        let start = Instant::now();
+        let result = pool.get_object_async().await;
+        let elapsed = start.elapsed();
+
+        assert!(matches!(result, Err(PoolError::CircuitBreakerOpen)));
+        assert!(elapsed < Duration::from_millis(200));
+    }
+
     #[tokio::test]
     async fn test_concurrent_access() {
         use std::sync::Arc;
@@ -995,7 +1055,7 @@ mod tests {
         for _ in 0..10 {
             let pool_clone = Arc::clone(&pool);
             let handle = tokio::spawn(async move {
-                if let Some(obj) = pool_clone.try_get_object() {
+                if let Ok(Some(obj)) = pool_clone.try_get_object() {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     drop(obj);
                     true
@@ -1145,5 +1205,35 @@ mod tests {
         assert_eq!(metrics.total_returned, 0);
         assert_eq!(metrics.active_objects, 0);
         assert_eq!(metrics.available_objects, 0);
+    }
+
+    #[test]
+    fn test_try_get_object_propagates_max_active_error() {
+        let pool = ObjectPool::new(
+            vec![1, 2],
+            PoolConfiguration::new().with_max_active_objects(1),
+        );
+
+        let _obj = pool.get_object().unwrap();
+
+        let result = pool.try_get_object();
+        assert!(matches!(result, Err(PoolError::MaxActiveObjectsReached)));
+    }
+
+    #[test]
+    fn test_try_get_object_propagates_circuit_breaker_error() {
+        let pool = ObjectPool::new(
+            vec![1],
+            PoolConfiguration::new().with_circuit_breaker(1, Duration::from_secs(60)),
+        );
+
+        let _obj = pool.get_object().unwrap();
+
+        // First empty attempt records a failure and opens the breaker.
+        let first = pool.try_get_object();
+        assert!(matches!(first, Ok(None)));
+
+        let second = pool.try_get_object();
+        assert!(matches!(second, Err(PoolError::CircuitBreakerOpen)));
     }
 }
