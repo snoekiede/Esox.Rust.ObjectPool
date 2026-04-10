@@ -96,14 +96,21 @@ impl CircuitBreaker {
     
     /// Record a successful operation
     pub fn record_success(&self) {
-        self.success_count.fetch_add(1, Ordering::Relaxed);
-        
         let current_state = self.state();
-        if current_state == CircuitBreakerState::HalfOpen {
-            // After a few successes in half-open, close the circuit
-            if self.success_count.load(Ordering::Relaxed) >= 3 {
-                self.transition_to_closed();
+        match current_state {
+            CircuitBreakerState::Closed => {
+                // In closed state, successes break the failure streak.
+                self.failure_count.store(0, Ordering::Relaxed);
             }
+            CircuitBreakerState::HalfOpen => {
+                self.success_count.fetch_add(1, Ordering::Relaxed);
+
+                // After a few successes in half-open, close the circuit.
+                if self.success_count.load(Ordering::Relaxed) >= 3 {
+                    self.transition_to_closed();
+                }
+            }
+            CircuitBreakerState::Open => {}
         }
     }
     
@@ -145,6 +152,52 @@ impl CircuitBreaker {
     /// Reset the circuit breaker
     pub fn reset(&self) {
         self.transition_to_closed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn does_not_open_on_non_consecutive_failures() {
+        let breaker = CircuitBreaker::new(3, Duration::from_secs(60));
+
+        breaker.record_failure();
+        breaker.record_success();
+        breaker.record_failure();
+        breaker.record_success();
+        breaker.record_failure();
+
+        assert_eq!(breaker.state(), CircuitBreakerState::Closed);
+        assert!(breaker.allow_request());
+    }
+
+    #[test]
+    fn opens_after_consecutive_failures() {
+        let breaker = CircuitBreaker::new(3, Duration::from_secs(60));
+
+        breaker.record_failure();
+        breaker.record_failure();
+        breaker.record_failure();
+
+        assert_eq!(breaker.state(), CircuitBreakerState::Open);
+        assert!(!breaker.allow_request());
+    }
+
+    #[test]
+    fn half_open_failure_reopens_immediately() {
+        let breaker = CircuitBreaker::new(1, Duration::from_millis(5));
+
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CircuitBreakerState::Open);
+
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(breaker.allow_request());
+        assert_eq!(breaker.state(), CircuitBreakerState::HalfOpen);
+
+        breaker.record_failure();
+        assert_eq!(breaker.state(), CircuitBreakerState::Open);
     }
 }
 
