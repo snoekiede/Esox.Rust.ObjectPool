@@ -187,9 +187,13 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         }
     }
     
-    /// Get an object from the pool (blocking)
+    /// Get an object from the pool (non-blocking)
     ///
-    /// Returns an error if the pool is empty or circuit breaker is open.
+    /// Returns immediately. If no object is available, this returns
+    /// `PoolError::PoolEmpty`.
+    ///
+    /// Also returns an error if the circuit breaker is open or max-active
+    /// limits are reached.
     ///
     /// # Examples
     ///

@@ -220,10 +220,10 @@ Fixed-size pool with pre-allocated objects.
 
 **Methods:**
 - `new(objects, config)` - Create pool with initial objects
-- `get_object()` - Get object (blocking, returns error if empty)
-- `try_get_object()` - Try to get object (returns `Option`)
+- `get_object()` - Get object (non-blocking, returns error if empty)
+- `try_get_object()` - Try to get object (returns `Result<Option<_>, PoolError>`)
 - `get_object_async()` - Async get with timeout
-- `try_get_object_async()` - Async try get
+- `try_get_object_async()` - Async try get (returns `Result<Option<_>, PoolError>`)
 - `get_health_status()` - Get health status
 - `export_metrics()` - Export metrics as HashMap
 - `export_metrics_prometheus()` - Export in Prometheus format
@@ -270,7 +270,7 @@ Configuration options for pool behavior.
 | `get_object()` | O(1) | Lock-free `ArrayQueue` pop |
 | `return_object()` | O(1) | Lock-free `ArrayQueue` push |
 | `get_object(query)` | O(n) worst | Early exit optimization |
-| `try_get_object()` | O(1) | Non-blocking variant |
+| `try_get_object()` | O(1) | Non-blocking variant with error propagation |
 
 ## Thread Safety
 
