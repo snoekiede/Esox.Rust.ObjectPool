@@ -38,6 +38,7 @@ pub struct PooledObject<T> {
     value: Option<T>,
     object_id: usize,
     return_fn: Arc<dyn Fn(T, usize) + Send + Sync>,
+    detach_fn: Arc<dyn Fn(usize) + Send + Sync>,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for PooledObject<T> {
@@ -50,16 +51,23 @@ impl<T: std::fmt::Debug> std::fmt::Debug for PooledObject<T> {
 }
 
 impl<T> PooledObject<T> {
-    fn new(value: T, object_id: usize, return_fn: Arc<dyn Fn(T, usize) + Send + Sync>) -> Self {
+    fn new(
+        value: T,
+        object_id: usize,
+        return_fn: Arc<dyn Fn(T, usize) + Send + Sync>,
+        detach_fn: Arc<dyn Fn(usize) + Send + Sync>,
+    ) -> Self {
         Self {
             value: Some(value),
             object_id,
             return_fn,
+            detach_fn,
         }
     }
     
     /// Get the inner value without returning to pool
     pub fn unwrap(mut self) -> T {
+        (self.detach_fn)(self.object_id);
         self.value.take().expect("Value already taken")
     }
 }
@@ -214,7 +222,8 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
                     }
                     
                     let return_fn = self.make_return_fn();
-                    return Ok(PooledObject::new(obj, id, return_fn));
+                    let detach_fn = self.make_detach_fn();
+                    return Ok(PooledObject::new(obj, id, return_fn, detach_fn));
                 }
                 None => {
                     self.metrics.pool_empty_events.fetch_add(1, Ordering::Relaxed);
@@ -361,6 +370,16 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
             health.increment_returned();
         })
     }
+
+    fn make_detach_fn(&self) -> Arc<dyn Fn(usize) + Send + Sync> {
+        let active = Arc::clone(&self.active);
+        let eviction = Arc::clone(&self.eviction);
+
+        Arc::new(move |id| {
+            active.remove(&id);
+            eviction.remove_object(id);
+        })
+    }
 }
 
 /// Queryable object pool - find objects matching a predicate
@@ -434,7 +453,8 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
             }
             
             let return_fn = self.inner.make_return_fn();
-            Ok(PooledObject::new(obj, id, return_fn))
+            let detach_fn = self.inner.make_detach_fn();
+            Ok(PooledObject::new(obj, id, return_fn, detach_fn))
         } else {
             if let Some(ref cb) = self.inner.circuit_breaker {
                 cb.record_failure();
@@ -550,7 +570,8 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
                     self.inner.health.increment_retrieved();
                     
                     let return_fn = self.inner.make_return_fn();
-                    Ok(PooledObject::new(obj, id, return_fn))
+                    let detach_fn = self.inner.make_detach_fn();
+                    Ok(PooledObject::new(obj, id, return_fn, detach_fn))
                 } else {
                     Err(PoolError::PoolFull)
                 }
@@ -1089,5 +1110,40 @@ mod tests {
         assert_eq!(config.max_active_objects, Some(25));
         assert_eq!(config.warmup_size, Some(10));
         assert!(config.enable_circuit_breaker);
+    }
+
+    #[test]
+    fn test_unwrap_cleans_active_state() {
+        let pool = ObjectPool::new(
+            vec![1],
+            PoolConfiguration::new().with_max_active_objects(1),
+        );
+
+        let obj = pool.get_object().unwrap();
+        assert_eq!(pool.active_count(), 1);
+
+        let value = obj.unwrap();
+        assert_eq!(value, 1);
+
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.available_count(), 0);
+
+        // Active slot is released, so next error should be pool-empty, not max-active.
+        let result = pool.get_object();
+        assert!(matches!(result, Err(PoolError::PoolEmpty)));
+    }
+
+    #[test]
+    fn test_unwrap_does_not_increment_returned_metrics() {
+        let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
+
+        let obj = pool.get_object().unwrap();
+        let _value = obj.unwrap();
+
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.total_retrieved, 1);
+        assert_eq!(metrics.total_returned, 0);
+        assert_eq!(metrics.active_objects, 0);
+        assert_eq!(metrics.available_objects, 0);
     }
 }
