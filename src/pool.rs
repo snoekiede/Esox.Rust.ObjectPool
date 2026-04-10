@@ -947,7 +947,53 @@ mod tests {
             assert!(matches!(e, PoolError::PoolFull));
         }
     }
-    
+
+    #[test]
+    fn test_dynamic_pool_propagates_max_active_without_creating() {
+        let created = Arc::new(AtomicUsize::new(0));
+        let created_clone = Arc::clone(&created);
+
+        let pool = DynamicObjectPool::with_initial(
+            move || {
+                created_clone.fetch_add(1, Ordering::Relaxed);
+                42
+            },
+            vec![1, 2],
+            PoolConfiguration::new().with_max_active_objects(1),
+        );
+
+        let _obj = pool.get_object().unwrap();
+        let result = pool.get_object();
+
+        assert!(matches!(result, Err(PoolError::MaxActiveObjectsReached)));
+        assert_eq!(created.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_dynamic_pool_propagates_circuit_breaker_without_extra_creation() {
+        let created = Arc::new(AtomicUsize::new(0));
+        let created_clone = Arc::clone(&created);
+
+        let pool = DynamicObjectPool::new(
+            move || {
+                created_clone.fetch_add(1, Ordering::Relaxed);
+                42
+            },
+            PoolConfiguration::new()
+                .with_max_pool_size(2)
+                .with_circuit_breaker(1, Duration::from_secs(60)),
+        );
+
+        // First call creates because the inner pool is empty.
+        let _obj = pool.get_object().unwrap();
+        assert_eq!(created.load(Ordering::Relaxed), 1);
+
+        // The first empty inner read opened the breaker, so this must fail fast.
+        let result = pool.get_object();
+        assert!(matches!(result, Err(PoolError::CircuitBreakerOpen)));
+        assert_eq!(created.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn test_eviction_ttl() {
         use std::thread;
