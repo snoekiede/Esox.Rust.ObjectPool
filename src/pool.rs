@@ -125,6 +125,8 @@ pub struct ObjectPool<T: Send> {
 }
 
 impl<T: Send + Sync + 'static> ObjectPool<T> {
+    const PUSH_RETRY_LIMIT: usize = 8;
+
     /// Create a new object pool with initial objects
     ///
     /// # Examples
@@ -373,9 +375,16 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
             
             eviction.touch_object(id);
             active.remove(&id);
-            let _ = available.push((obj, id));
-            metrics.total_returned.fetch_add(1, Ordering::Relaxed);
-            health.increment_returned();
+            match ObjectPool::<T>::push_available_with_retry(available.as_ref(), (obj, id)) {
+                Ok(()) => {
+                    metrics.total_returned.fetch_add(1, Ordering::Relaxed);
+                    health.increment_returned();
+                }
+                Err((_obj, failed_id)) => {
+                    metrics.queue_push_failures.fetch_add(1, Ordering::Relaxed);
+                    eviction.remove_object(failed_id);
+                }
+            }
         })
     }
 
@@ -387,6 +396,23 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
             active.remove(&id);
             eviction.remove_object(id);
         })
+    }
+
+    fn push_available_with_retry(
+        available: &ArrayQueue<(T, usize)>,
+        mut item: (T, usize),
+    ) -> Result<(), (T, usize)> {
+        for _ in 0..Self::PUSH_RETRY_LIMIT {
+            match available.push(item) {
+                Ok(()) => return Ok(()),
+                Err(returned_item) => {
+                    item = returned_item;
+                    std::thread::yield_now();
+                }
+            }
+        }
+
+        Err(item)
     }
 }
 
@@ -447,7 +473,13 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
         
         // Return non-matching objects
         for item in temp_storage {
-            let _ = self.inner.available.push(item);
+            if let Err((_obj, failed_id)) = ObjectPool::<T>::push_available_with_retry(
+                self.inner.available.as_ref(),
+                item,
+            ) {
+                self.inner.metrics.queue_push_failures.fetch_add(1, Ordering::Relaxed);
+                self.inner.eviction.remove_object(failed_id);
+            }
         }
         
         if let Some((obj, id)) = found {
@@ -1182,10 +1214,29 @@ mod tests {
         assert!(metrics_map.contains_key("total_retrieved"));
         assert!(metrics_map.contains_key("total_returned"));
         assert!(metrics_map.contains_key("active_objects"));
+        assert!(metrics_map.contains_key("queue_push_failures"));
         assert_eq!(metrics_map.get("total_retrieved").unwrap(), "1");
         assert_eq!(metrics_map.get("total_returned").unwrap(), "1");
     }
-    
+
+    #[test]
+    fn test_return_push_failure_is_tracked() {
+        let config = PoolConfiguration::new().with_max_pool_size(1);
+        let pool = ObjectPool::new(vec![1], config);
+
+        let obj = pool.get_object().unwrap();
+
+        // Fill the queue while the checked-out object is still active.
+        pool.available.push((2, 999)).unwrap();
+
+        drop(obj);
+
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.queue_push_failures, 1);
+        assert_eq!(metrics.total_returned, 0);
+        assert_eq!(pool.active_count(), 0);
+    }
+
     #[test]
     fn test_health_warnings() {
         let config = PoolConfiguration::new()

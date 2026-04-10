@@ -39,7 +39,10 @@ pub struct PoolMetrics {
     
     /// Validation failures
     pub validation_failures: usize,
-    
+
+    /// Queue push failures that caused object drops
+    pub queue_push_failures: usize,
+
     /// Pool utilization ratio (0.0 to 1.0)
     pub utilization: f64,
     
@@ -57,6 +60,7 @@ impl PoolMetrics {
         metrics.insert("available_objects".to_string(), self.available_objects.to_string());
         metrics.insert("pool_empty_events".to_string(), self.pool_empty_events.to_string());
         metrics.insert("validation_failures".to_string(), self.validation_failures.to_string());
+        metrics.insert("queue_push_failures".to_string(), self.queue_push_failures.to_string());
         metrics.insert("utilization".to_string(), format!("{:.2}", self.utilization));
         metrics.insert("max_capacity".to_string(), self.max_capacity.to_string());
         metrics
@@ -121,7 +125,11 @@ impl MetricsExporter {
         output.push_str("# HELP objectpool_validation_failures_total Validation failures\n");
         output.push_str("# TYPE objectpool_validation_failures_total counter\n");
         output.push_str(&format!("objectpool_validation_failures_total{{{}}} {}\n", labels, metrics.validation_failures));
-        
+
+        output.push_str("# HELP objectpool_queue_push_failures_total Queue push failures causing object drops\n");
+        output.push_str("# TYPE objectpool_queue_push_failures_total counter\n");
+        output.push_str(&format!("objectpool_queue_push_failures_total{{{}}} {}\n", labels, metrics.queue_push_failures));
+
         output
     }
     
@@ -144,6 +152,7 @@ pub(crate) struct MetricsTracker {
     pub total_returned: Arc<AtomicUsize>,
     pub pool_empty_events: Arc<AtomicUsize>,
     pub validation_failures: Arc<AtomicUsize>,
+    pub queue_push_failures: Arc<AtomicUsize>,
 }
 
 impl MetricsTracker {
@@ -153,6 +162,7 @@ impl MetricsTracker {
             total_returned: Arc::new(AtomicUsize::new(0)),
             pool_empty_events: Arc::new(AtomicUsize::new(0)),
             validation_failures: Arc::new(AtomicUsize::new(0)),
+            queue_push_failures: Arc::new(AtomicUsize::new(0)),
         }
     }
     
@@ -170,6 +180,7 @@ impl MetricsTracker {
             available_objects: available,
             pool_empty_events: self.pool_empty_events.load(Ordering::Relaxed),
             validation_failures: self.validation_failures.load(Ordering::Relaxed),
+            queue_push_failures: self.queue_push_failures.load(Ordering::Relaxed),
             utilization,
             max_capacity: capacity,
         }
