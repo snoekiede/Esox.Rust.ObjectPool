@@ -28,8 +28,16 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-objectpool = { path = "." }  # Or from crates.io when published
-tokio = { version = "1.42", features = ["full"] }
+esox_objectpool = "1"
+tokio = { version = "1", features = ["full"] }
+```
+
+If you prefer the shorter `objectpool::` path in your code, rename the dependency:
+
+```toml
+[dependencies]
+objectpool = { package = "esox_objectpool", version = "1" }
+tokio = { version = "1", features = ["full"] }
 ```
 
 ## Quick Start
@@ -443,16 +451,19 @@ cargo test --release  # With optimizations
 
 ## Version History
 
-### 1.0.0 (Current) - December 2025
-- **Initial Rust port** from .NET EsoxSolutions.ObjectPool v4.0.0
-- Thread-safe pooling with lock-free operations
-- Async support with tokio
-- Health monitoring and Prometheus metrics
-- Eviction / TTL support
-- Circuit breaker pattern
+### 1.0.0 (Current) - April 2026
+- **Initial crates.io release** (Rust port of .NET EsoxSolutions.ObjectPool v4.0.0)
+- Thread-safe pooling with lock-free operations (`crossbeam::ArrayQueue` + `dashmap`)
+- Async support with tokio (`get_object_async`, `warmup_async`)
+- Health monitoring with circuit-breaker state in `HealthStatus`
+- Prometheus-format metrics export
+- Proactive eviction via `evict_expired()` + lazy eviction on checkout
+- Graceful-shutdown `drain()` on all pool types
+- Circuit breaker (Closed → Open → Half-Open) with consecutive-failure counting
 - Pool warm-up / pre-population
-- Queryable and dynamic pools
-- Comprehensive examples and documentation
+- Queryable and dynamic pools with full observability (`available_count`, `active_count`)
+- `DynamicObjectPool`: TOCTOU-safe capacity enforcement; CB failure offset on successful creation
+- Requires Rust 1.88+
 
 ## Architecture Differences
 

@@ -2,36 +2,30 @@
 name = "esox_objectpool"
 version = "1.0.0"
 edition = "2024"
+rust-version = "1.88"
 authors = ["Iede Snoek <info@esoxsolutions.nl>"]
-description = "High-performance, thread-safe object pool with async support, metrics, and advanced features"
-documentation="https://docs.rs/objectpool"
-homepage="https://github.com/snoekiede/Esox.Rust.ObjectPool"
-repository="https://github.com/snoekiede/Esox.Rust.ObjectPool"
+description = "High-performance, thread-safe object pool with async support, circuit breaker, eviction, health monitoring and Prometheus metrics"
+documentation = "https://docs.rs/esox_objectpool"
+homepage = "https://github.com/snoekiede/Esox.Rust.ObjectPool"
+repository = "https://github.com/snoekiede/Esox.Rust.ObjectPool"
 license = "MIT"
-keywords = ["pool", "object-pool", "async", "threading", "performance"]
+readme = "README.md"
+keywords = ["pool", "object-pool", "async", "concurrency", "performance"]
 categories = ["concurrency", "asynchronous", "caching"]
-exclude=[
-    ".github/*",
-    "examples/*",
-    "tests/*",
+exclude = [
+    ".idea/",
+    ".github/",
+    "*.md.bak",
 ]
 
 [dependencies]
-tokio = { version = "1.42", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 crossbeam = "0.8"
-parking_lot = "0.12"
-dashmap = "6.1"
-async-trait = "0.1"
-thiserror = "2.0"
-serde = { version = "1.0", features = ["derive"], optional = true }
-prometheus = { version = "0.13", optional = true }
+dashmap = "6"
+thiserror = "2"
 
 [dev-dependencies]
 criterion = "0.5"
-
-[features]
-default = ["metrics"]
-metrics = ["serde", "prometheus"]
 
 [[example]]
 name = "basic"
