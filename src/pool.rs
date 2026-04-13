@@ -5,7 +5,7 @@ use crate::errors::{PoolError, PoolResult};
 use crate::health::{HealthStatus, HealthTracker};
 use crate::metrics::{MetricsExporter, MetricsTracker, PoolMetrics};
 use crate::eviction::{EvictionPolicy, EvictionTracker};
-use crate::circuit_breaker::CircuitBreaker;
+use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 
 use crossbeam::queue::ArrayQueue;
 use dashmap::DashMap;
@@ -301,7 +301,12 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     pub fn get_health_status(&self) -> HealthStatus {
         let available = self.available.len();
         let active = self.active.len();
-        HealthStatus::new(available, active, self.capacity)
+        let cb_open = self
+            .circuit_breaker
+            .as_ref()
+            .map(|cb| matches!(cb.state(), CircuitBreakerState::Open))
+            .unwrap_or(false);
+        HealthStatus::new(available, active, self.capacity, cb_open)
     }
     
     /// Export metrics
@@ -333,12 +338,66 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     pub fn available_count(&self) -> usize {
         self.available.len()
     }
-    
+
     /// Get active count
     pub fn active_count(&self) -> usize {
         self.active.len()
     }
-    
+
+    /// Proactively remove all expired objects from the available queue.
+    ///
+    /// Returns the number of objects evicted. Call this periodically (e.g. from a
+    /// `tokio::spawn` background task) when using TTL or idle-timeout eviction,
+    /// because expiry is otherwise only enforced lazily on `get_object()`.
+    pub fn evict_expired(&self) -> usize {
+        let mut evicted = 0;
+        let mut keep = Vec::new();
+
+        while let Some((obj, id)) = self.available.pop() {
+            if self.eviction.is_expired(id) {
+                self.eviction.remove_object(id);
+                evicted += 1;
+            } else {
+                keep.push((obj, id));
+            }
+        }
+
+        for item in keep {
+            if Self::push_available_with_retry(&self.available, item).is_err() {
+                // Queue is unexpectedly full (concurrent returns filled it while we
+                // were scanning). Count the object as lost and update the metric.
+                self.metrics.queue_push_failures.fetch_add(1, Ordering::Relaxed);
+                evicted += 1;
+            }
+        }
+
+        evicted
+    }
+
+    /// Drain all *available* (not currently checked-out) objects from the pool
+    /// and return them. Active objects are unaffected.
+    ///
+    /// Useful for graceful shutdown: drain the pool, then wait for active
+    /// `PooledObject`s to be dropped (which will attempt to return to an empty
+    /// queue; those objects are silently discarded).
+    pub fn drain(&self) -> Vec<T> {
+        let mut objects = Vec::new();
+        while let Some((obj, id)) = self.available.pop() {
+            self.eviction.remove_object(id);
+            objects.push(obj);
+        }
+        objects
+    }
+
+    /// Record a circuit-breaker success from an external caller (used by
+    /// `DynamicObjectPool` to offset the failure recorded when the inner queue
+    /// was empty but the request was ultimately served via dynamic creation).
+    pub(crate) fn record_circuit_breaker_success(&self) {
+        if let Some(ref cb) = self.circuit_breaker {
+            cb.record_success();
+        }
+    }
+
     fn check_circuit_breaker(&self) -> PoolResult<()> {
         if let Some(ref cb) = self.circuit_breaker
             && !cb.allow_request()
@@ -545,11 +604,29 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
     pub fn get_health_status(&self) -> HealthStatus {
         self.inner.get_health_status()
     }
-    
+
+    pub fn available_count(&self) -> usize {
+        self.inner.available_count()
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.inner.active_count()
+    }
+
+    /// Proactively remove expired objects. See [`ObjectPool::evict_expired`].
+    pub fn evict_expired(&self) -> usize {
+        self.inner.evict_expired()
+    }
+
+    /// Drain all available objects. See [`ObjectPool::drain`].
+    pub fn drain(&self) -> Vec<T> {
+        self.inner.drain()
+    }
+
     pub fn export_metrics(&self) -> HashMap<String, String> {
         self.inner.export_metrics()
     }
-    
+
     pub fn export_metrics_prometheus(
         &self,
         pool_name: &str,
@@ -577,6 +654,8 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
 pub struct DynamicObjectPool<T: Send> {
     inner: ObjectPool<T>,
     factory: Arc<dyn Fn() -> T + Send + Sync>,
+    /// Serialises dynamic object creation to prevent TOCTOU over-creation.
+    create_lock: std::sync::Mutex<()>,
 }
 
 impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
@@ -585,13 +664,13 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
     where
         F: Fn() -> T + Send + Sync + 'static,
     {
-        let initial_objects = Vec::new();
         Self {
-            inner: ObjectPool::new(initial_objects, config),
+            inner: ObjectPool::new(Vec::new(), config),
             factory: Arc::new(factory),
+            create_lock: std::sync::Mutex::new(()),
         }
     }
-    
+
     /// Create a dynamic pool with initial objects and factory
     pub fn with_initial<F>(factory: F, initial_objects: Vec<T>, config: PoolConfiguration<T>) -> Self
     where
@@ -600,30 +679,50 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
         Self {
             inner: ObjectPool::new(initial_objects, config),
             factory: Arc::new(factory),
+            create_lock: std::sync::Mutex::new(()),
         }
     }
     
-    /// Get an object, creating one if pool is empty
+    /// Get an object, creating one via the factory if the pool is empty.
+    ///
+    /// Dynamic creation only proceeds when the pool is empty **and** the total
+    /// live object count (active + available) is below `max_pool_size`.
+    /// `CircuitBreakerOpen` and `MaxActiveObjectsReached` are propagated
+    /// immediately — the factory is **never** called in those cases.
+    ///
+    /// A `Mutex` serialises the capacity check + creation step, preventing the
+    /// TOCTOU race where two concurrent callers both see room and both create an
+    /// object, exceeding the configured capacity.
     pub fn get_object(&self) -> PoolResult<PooledObject<T>> {
         match self.inner.get_object() {
             Ok(obj) => Ok(obj),
             Err(PoolError::PoolEmpty) => {
-                // Create new object if under capacity
-                if self.inner.active.len() < self.inner.capacity {
-                    let obj = (self.factory)();
-                    let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-                    
-                    self.inner.eviction.track_object(id);
-                    self.inner.active.insert(id, ());
-                    self.inner.metrics.total_retrieved.fetch_add(1, Ordering::Relaxed);
-                    self.inner.health.increment_retrieved();
-                    
-                    let return_fn = self.inner.make_return_fn();
-                    let detach_fn = self.inner.make_detach_fn();
-                    Ok(PooledObject::new(obj, id, return_fn, detach_fn))
-                } else {
-                    Err(PoolError::PoolFull)
+                // Serialise capacity check + creation to prevent TOCTOU race.
+                let _guard = self.create_lock.lock().unwrap_or_else(|p| p.into_inner());
+
+                // Re-check under the lock: a concurrent thread may have returned
+                // an object or hit capacity between the PoolEmpty error and here.
+                let total_live = self.inner.active.len() + self.inner.available.len();
+                if total_live >= self.inner.capacity {
+                    return Err(PoolError::PoolFull);
                 }
+
+                let obj = (self.factory)();
+                let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+
+                self.inner.eviction.track_object(id);
+                self.inner.active.insert(id, ());
+                self.inner.metrics.total_retrieved.fetch_add(1, Ordering::Relaxed);
+                self.inner.health.increment_retrieved();
+
+                // The inner `get_object()` recorded a CB failure for the empty
+                // queue. Since we successfully served the request, offset it with
+                // a success so routine dynamic creation doesn't trip the breaker.
+                self.inner.record_circuit_breaker_success();
+
+                let return_fn = self.inner.make_return_fn();
+                let detach_fn = self.inner.make_detach_fn();
+                Ok(PooledObject::new(obj, id, return_fn, detach_fn))
             }
             Err(err) => Err(err),
         }
@@ -718,11 +817,29 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
     pub fn get_health_status(&self) -> HealthStatus {
         self.inner.get_health_status()
     }
-    
+
+    pub fn available_count(&self) -> usize {
+        self.inner.available_count()
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.inner.active_count()
+    }
+
+    /// Proactively remove expired objects. See [`ObjectPool::evict_expired`].
+    pub fn evict_expired(&self) -> usize {
+        self.inner.evict_expired()
+    }
+
+    /// Drain all available objects. See [`ObjectPool::drain`].
+    pub fn drain(&self) -> Vec<T> {
+        self.inner.drain()
+    }
+
     pub fn export_metrics(&self) -> HashMap<String, String> {
         self.inner.export_metrics()
     }
-    
+
     pub fn export_metrics_prometheus(
         &self,
         pool_name: &str,
@@ -1336,5 +1453,118 @@ mod tests {
 
         let second = pool.try_get_object();
         assert!(matches!(second, Err(PoolError::CircuitBreakerOpen)));
+    }
+
+    // ── DynamicObjectPool: circuit breaker does not trip on successful dynamic creation ──
+
+    #[test]
+    fn test_dynamic_pool_cb_does_not_trip_on_routine_creation() {
+        // Threshold = 3: the CB must NOT open when every empty-pool event is
+        // immediately followed by a successful dynamic creation.
+        let pool = DynamicObjectPool::new(
+            || 42,
+            PoolConfiguration::new()
+                .with_max_pool_size(10)
+                .with_circuit_breaker(3, Duration::from_secs(60)),
+        );
+
+        // Create 4 objects (all via dynamic creation); the CB should remain closed.
+        let _a = pool.get_object().unwrap();
+        let _b = pool.get_object().unwrap();
+        let _c = pool.get_object().unwrap();
+        let _d = pool.get_object().unwrap();
+
+        let health = pool.get_health_status();
+        assert!(!health.circuit_breaker_open, "CB must stay closed during normal dynamic creation");
+    }
+
+    // ── evict_expired ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_evict_expired_removes_stale_objects() {
+        use std::thread;
+
+        let config = PoolConfiguration::new()
+            .with_ttl(Duration::from_millis(50));
+
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+
+        thread::sleep(Duration::from_millis(80));
+
+        let evicted = pool.evict_expired();
+        assert_eq!(evicted, 3, "all three objects should have been evicted");
+        assert_eq!(pool.available_count(), 0);
+    }
+
+    #[test]
+    fn test_evict_expired_keeps_fresh_objects() {
+        let config = PoolConfiguration::new()
+            .with_ttl(Duration::from_secs(300));
+
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+
+        let evicted = pool.evict_expired();
+        assert_eq!(evicted, 0);
+        assert_eq!(pool.available_count(), 3);
+    }
+
+    // ── drain ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_drain_returns_available_objects() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+
+        let drained = pool.drain();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(pool.available_count(), 0);
+    }
+
+    #[test]
+    fn test_drain_does_not_affect_active_objects() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+
+        let _obj = pool.get_object().unwrap(); // 1 active
+        let drained = pool.drain();
+        assert_eq!(drained.len(), 2); // only the 2 available ones
+        assert_eq!(pool.active_count(), 1);
+    }
+
+    // ── HealthStatus includes circuit-breaker state ───────────────────────────────────
+
+    #[test]
+    fn test_health_status_includes_cb_state() {
+        let pool = ObjectPool::new(
+            vec![1],
+            PoolConfiguration::new().with_circuit_breaker(1, Duration::from_secs(60)),
+        );
+
+        // Before the breaker opens the pool should be healthy.
+        assert!(!pool.get_health_status().circuit_breaker_open);
+
+        let _obj = pool.get_object().unwrap();
+        let _ = pool.try_get_object(); // opens the breaker (threshold = 1)
+
+        let health = pool.get_health_status();
+        assert!(health.circuit_breaker_open);
+        assert!(!health.is_healthy);
+        assert!(health.warnings.iter().any(|w| w.contains("Circuit breaker")));
+    }
+
+    // ── DynamicObjectPool: observable counts and eviction ────────────────────────────
+
+    #[test]
+    fn test_dynamic_pool_available_and_active_counts() {
+        let pool = DynamicObjectPool::new(
+            || 0u8,
+            PoolConfiguration::new().with_max_pool_size(5),
+        );
+
+        let _a = pool.get_object().unwrap();
+        let _b = pool.get_object().unwrap();
+
+        assert_eq!(pool.active_count(), 2);
+
+        drop(_a);
+        assert_eq!(pool.available_count(), 1);
     }
 }

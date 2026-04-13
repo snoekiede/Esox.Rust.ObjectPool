@@ -1,8 +1,7 @@
 //! Eviction policies for automatic object removal
 
+use dashmap::DashMap;
 use std::time::{Duration, Instant};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 
 /// Eviction policy for pool objects
 ///
@@ -76,7 +75,7 @@ impl ObjectMetadata {
 
 /// Tracker for object metadata
 pub(crate) struct EvictionTracker<T> {
-    metadata: Arc<Mutex<HashMap<usize, ObjectMetadata>>>,
+    metadata: DashMap<usize, ObjectMetadata>,
     policy: EvictionPolicy,
     _phantom: std::marker::PhantomData<T>,
 }
@@ -84,57 +83,50 @@ pub(crate) struct EvictionTracker<T> {
 impl<T> EvictionTracker<T> {
     pub fn new(policy: EvictionPolicy) -> Self {
         Self {
-            metadata: Arc::new(Mutex::new(HashMap::new())),
+            metadata: DashMap::new(),
             policy,
             _phantom: std::marker::PhantomData,
         }
     }
-    
+
     pub fn track_object(&self, id: usize) {
         if !matches!(self.policy, EvictionPolicy::None) {
-            let mut metadata = self.metadata.lock().unwrap();
-            metadata.insert(id, ObjectMetadata::new());
+            self.metadata.insert(id, ObjectMetadata::new());
         }
     }
-    
+
     pub fn touch_object(&self, id: usize) {
         if !matches!(self.policy, EvictionPolicy::None) {
-            let mut metadata = self.metadata.lock().unwrap();
-            if let Some(meta) = metadata.get_mut(&id) {
+            if let Some(mut meta) = self.metadata.get_mut(&id) {
                 meta.touch();
             }
         }
     }
-    
+
     pub fn is_expired(&self, id: usize) -> bool {
         if matches!(self.policy, EvictionPolicy::None) {
             return false;
         }
-        
-        let metadata = self.metadata.lock().unwrap();
-        if let Some(meta) = metadata.get(&id) {
-            meta.is_expired(&self.policy)
-        } else {
-            false
-        }
+        self.metadata
+            .get(&id)
+            .map_or(false, |meta| meta.is_expired(&self.policy))
     }
-    
+
     pub fn remove_object(&self, id: usize) {
-        let mut metadata = self.metadata.lock().unwrap();
-        metadata.remove(&id);
+        self.metadata.remove(&id);
     }
-    
+
+    /// Returns the IDs of all currently expired objects. Useful for inspection;
+    /// for actual removal use [`ObjectPool::evict_expired`].
     #[allow(dead_code)]
     pub fn get_expired_objects(&self) -> Vec<usize> {
         if matches!(self.policy, EvictionPolicy::None) {
             return Vec::new();
         }
-        
-        let metadata = self.metadata.lock().unwrap();
-        metadata
+        self.metadata
             .iter()
-            .filter(|(_, meta)| meta.is_expired(&self.policy))
-            .map(|(id, _)| *id)
+            .filter(|entry| entry.value().is_expired(&self.policy))
+            .map(|entry| *entry.key())
             .collect()
     }
 }

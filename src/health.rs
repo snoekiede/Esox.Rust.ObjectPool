@@ -20,51 +20,66 @@ use std::sync::Arc;
 pub struct HealthStatus {
     /// Whether the pool is healthy
     pub is_healthy: bool,
-    
+
+    /// Whether the circuit breaker is currently open
+    pub circuit_breaker_open: bool,
+
     /// Number of warnings detected
     pub warning_count: usize,
-    
+
     /// Current pool utilization (0.0 to 1.0)
     pub utilization: f64,
-    
+
     /// Available objects count
     pub available_objects: usize,
-    
+
     /// Active objects count
     pub active_objects: usize,
-    
+
     /// Total capacity
     pub total_capacity: usize,
-    
+
     /// Warning messages
     pub warnings: Vec<String>,
 }
 
 impl HealthStatus {
     /// Create a new health status
-    pub fn new(available: usize, active: usize, capacity: usize) -> Self {
+    pub fn new(
+        available: usize,
+        active: usize,
+        capacity: usize,
+        circuit_breaker_open: bool,
+    ) -> Self {
         let utilization = if capacity > 0 {
             active as f64 / capacity as f64
         } else {
             0.0
         };
-        
+
         let mut warnings = Vec::new();
         let mut is_healthy = true;
-        
+
         // Check for high utilization
         if utilization > 0.9 {
             warnings.push(format!("High utilization: {:.1}%", utilization * 100.0));
             is_healthy = false;
         }
-        
+
         // Check if pool is empty
         if available == 0 && capacity > 0 {
             warnings.push("Pool is empty".to_string());
         }
-        
+
+        // Check circuit breaker
+        if circuit_breaker_open {
+            warnings.push("Circuit breaker is open".to_string());
+            is_healthy = false;
+        }
+
         Self {
             is_healthy,
+            circuit_breaker_open,
             warning_count: warnings.len(),
             utilization,
             available_objects: available,
@@ -73,7 +88,7 @@ impl HealthStatus {
             warnings,
         }
     }
-    
+
     /// Check if the pool is healthy
     pub fn is_healthy(&self) -> bool {
         self.is_healthy
@@ -100,24 +115,24 @@ impl HealthTracker {
             is_healthy: Arc::new(AtomicBool::new(true)),
         }
     }
-    
+
     pub fn increment_retrieved(&self) {
         self.total_retrieved.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub fn increment_returned(&self) {
         self.total_returned.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub fn increment_empty(&self) {
         self.pool_empty_count.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     #[allow(dead_code)]
     pub fn increment_validation_failure(&self) {
         self.validation_failures.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     #[allow(dead_code)]
     pub fn set_health(&self, healthy: bool) {
         self.is_healthy.store(healthy, Ordering::Relaxed);

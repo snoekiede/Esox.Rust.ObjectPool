@@ -166,6 +166,9 @@ async fn main() {
 
 ### Eviction / TTL
 
+Expired objects are filtered out lazily on each `get_object()` call. For strict TTL
+enforcement, call `evict_expired()` periodically — for example from a background task:
+
 ```rust
 use objectpool::{ObjectPool, PoolConfiguration};
 use std::time::Duration;
@@ -177,6 +180,28 @@ fn main() {
 
     let pool = ObjectPool::new(vec![1, 2, 3], config);
     // Expired objects automatically filtered on retrieval
+}
+```
+
+```rust
+use objectpool::ObjectPool;
+use std::sync::Arc;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() {
+    let pool = Arc::new(ObjectPool::new(vec![1, 2, 3],
+        objectpool::PoolConfiguration::new().with_ttl(Duration::from_secs(60))));
+
+    // Background eviction sweep every 30 seconds
+    let pool_sweep = Arc::clone(&pool);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let n = pool_sweep.evict_expired();
+            if n > 0 { eprintln!("evicted {} expired objects", n); }
+        }
+    });
 }
 ```
 
@@ -209,14 +234,21 @@ fn main() {
 
 ### Health Monitoring
 
+The health status now includes the circuit breaker state. A pool with an open
+circuit breaker is reported as unhealthy.
+
 ```rust
 fn main() {
     let pool = objectpool::ObjectPool::new(vec![1, 2, 3], Default::default());
     let health = pool.get_health_status();
     println!("Healthy: {}", health.is_healthy);
+    println!("CB open: {}", health.circuit_breaker_open);
     println!("Utilization: {:.1}%", health.utilization * 100.0);
     println!("Active: {}, Available: {}",
         health.active_objects, health.available_objects);
+    for warning in &health.warnings {
+        eprintln!("WARN: {}", warning);
+    }
 }
 ```
 
@@ -287,7 +319,11 @@ Fixed-size pool with pre-allocated objects.
 - `try_get_object()` - Try to get object; returns `Ok(None)` **only** for an empty pool — operational errors (`CircuitBreakerOpen`, `MaxActiveObjectsReached`) are still returned as `Err`
 - `get_object_async()` - Async get with timeout; **non-retryable errors (`CircuitBreakerOpen`, `MaxActiveObjectsReached`) are returned immediately** without waiting for the timeout
 - `try_get_object_async()` - Thin async wrapper around `try_get_object()`; performs a single non-blocking attempt (no polling loop, no timeout)
-- `get_health_status()` - Get health status
+- `available_count()` - Number of objects currently available in the queue
+- `active_count()` - Number of objects currently checked out
+- `evict_expired()` - Proactively remove expired objects; returns count evicted
+- `drain()` - Remove and return all available objects (for graceful shutdown)
+- `get_health_status()` - Get health status (includes circuit breaker state)
 - `export_metrics()` - Export metrics as HashMap
 - `export_metrics_prometheus()` - Export in Prometheus format
 
@@ -308,7 +344,10 @@ Pool that creates objects on-demand using a factory function.
 **Methods:**
 - `new(factory, config)` - Create with factory function
 - `with_initial(factory, objects, config)` - Create with initial objects and factory
-- `get_object()` - Returns an available pooled object if one exists; calls the factory to create a new one **only** when the pool is empty *and* the active count is below capacity. `CircuitBreakerOpen` and `MaxActiveObjectsReached` are propagated immediately — the factory is **not** called.
+- `get_object()` - Returns an available pooled object if one exists; calls the factory to create a new one **only** when the pool is empty *and* the active + available count is below capacity (enforced with a `Mutex` to prevent concurrent over-creation). `CircuitBreakerOpen` and `MaxActiveObjectsReached` are propagated immediately — the factory is **not** called.
+- `available_count()` / `active_count()` - Observe pool state
+- `evict_expired()` - Proactively remove expired objects
+- `drain()` - Remove and return all available objects
 - `warmup(count)` - Pre-populate pool (capped at pool capacity)
 - `warmup_async(count)` - Async pre-population
 
@@ -386,7 +425,8 @@ This library is suitable for:
 **Known Limitations:**
 - `PooledObject::unwrap()` permanently removes the object from pool capacity; the active slot is freed but the object is never returned. Avoid in hot paths where maintaining pool size matters.
 - `try_get_object_async()` is a thin async wrapper around the synchronous `try_get_object()` — it performs one non-blocking attempt and returns immediately. It does **not** poll or apply a timeout.
-- The circuit breaker uses a consecutive-failure counter. Pool-empty events count as failures, so a legitimately busy pool can trip the breaker if the threshold is set too low relative to pool size.
+- TTL/idle-timeout eviction is lazy (expired objects are filtered on checkout). For strict enforcement, call `evict_expired()` periodically from a background task.
+- `QueryableObjectPool::get_object()` drains the entire queue to scan for a matching object, then refills it. Concurrent callers serialise on the lock-free queue, making it unsuitable for high-throughput concurrent use.
 - When the return-to-pool queue push fails after retries (e.g. under extreme contention with a full queue), the object is discarded and the `queue_push_failures` metric is incremented. This permanently reduces pool capacity.
 - No built-in integration with web frameworks (e.g. Actix, Axum, Rocket).
 - Health checks and metrics endpoints must be manually wired up.
