@@ -65,10 +65,91 @@ impl<T> PooledObject<T> {
         }
     }
     
-    /// Get the inner value without returning to pool
-    pub fn unwrap(mut self) -> T {
+    /// Permanently remove the inner value from the pool and take ownership.
+    ///
+    /// The object is **not** returned to the pool. Pool capacity is permanently
+    /// reduced by one. Use this only when you explicitly need to own `T` beyond
+    /// the pool's lifetime.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use esox_objectpool::{ObjectPool, PoolConfiguration};
+    ///
+    /// let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
+    /// let obj = pool.get_object().unwrap();
+    ///
+    /// // Permanently take the value out of the pool.
+    /// let value = obj.into_detached();
+    /// assert_eq!(value, 1);
+    /// assert_eq!(pool.available_count(), 0); // capacity is gone
+    /// ```
+    pub fn into_detached(mut self) -> T {
         (self.detach_fn)(self.object_id);
         self.value.take().expect("Value already taken")
+    }
+
+    /// Get the inner value without returning to pool.
+    ///
+    /// # Deprecation
+    ///
+    /// This method permanently removes the object from the pool (it is **not**
+    /// returned when the `PooledObject` is dropped), which silently reduces pool
+    /// capacity. Use [`PooledObject::into_detached`] instead to make the intent
+    /// explicit.
+    #[deprecated(since = "1.1.0", note = "Use `into_detached()` to make permanent pool removal explicit")]
+    pub fn unwrap(self) -> T {
+        self.into_detached()
+    }
+
+    /// Borrow the inner value without affecting pool state.
+    ///
+    /// The object is **not** removed from the pool. When the `PooledObject` is
+    /// dropped it will still be returned to the pool as normal.
+    ///
+    /// This is identical to `&**obj` via [`Deref`], but provides an explicit,
+    /// readable call-site alternative.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use esox_objectpool::{ObjectPool, PoolConfiguration};
+    ///
+    /// let pool = ObjectPool::new(vec![42], PoolConfiguration::default());
+    /// let obj = pool.get_object().unwrap();
+    ///
+    /// // Inspect the value — obj is still in the pool when dropped.
+    /// assert_eq!(*obj.get(), 42);
+    /// drop(obj);
+    /// assert_eq!(pool.available_count(), 1); // returned as normal
+    /// ```
+    pub fn get(&self) -> &T {
+        self.value.as_ref().expect("Value already taken")
+    }
+
+    /// Mutably borrow the inner value without affecting pool state.
+    ///
+    /// The object is **not** removed from the pool. When the `PooledObject` is
+    /// dropped it will still be returned to the pool as normal.
+    ///
+    /// This is identical to `&mut **obj` via [`DerefMut`], but provides an
+    /// explicit, readable call-site alternative.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use esox_objectpool::{ObjectPool, PoolConfiguration};
+    ///
+    /// let pool = ObjectPool::new(vec![0], PoolConfiguration::default());
+    /// let mut obj = pool.get_object().unwrap();
+    ///
+    /// *obj.get_mut() = 99;
+    /// assert_eq!(*obj.get(), 99);
+    /// drop(obj);
+    /// assert_eq!(pool.available_count(), 1); // returned as normal
+    /// ```
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.as_mut().expect("Value already taken")
     }
 }
 
@@ -454,10 +535,12 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     fn make_detach_fn(&self) -> Arc<dyn Fn(usize) + Send + Sync> {
         let active = Arc::clone(&self.active);
         let eviction = Arc::clone(&self.eviction);
+        let metrics = Arc::clone(&self.metrics);
 
         Arc::new(move |id| {
             active.remove(&id);
             eviction.remove_object(id);
+            metrics.total_detached.fetch_add(1, Ordering::Relaxed);
         })
     }
 
@@ -1391,7 +1474,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unwrap_cleans_active_state() {
+    fn test_into_detached_cleans_active_state() {
         let pool = ObjectPool::new(
             vec![1],
             PoolConfiguration::new().with_max_active_objects(1),
@@ -1400,7 +1483,7 @@ mod tests {
         let obj = pool.get_object().unwrap();
         assert_eq!(pool.active_count(), 1);
 
-        let value = obj.unwrap();
+        let value = obj.into_detached();
         assert_eq!(value, 1);
 
         assert_eq!(pool.active_count(), 0);
@@ -1412,17 +1495,52 @@ mod tests {
     }
 
     #[test]
-    fn test_unwrap_does_not_increment_returned_metrics() {
+    fn test_into_detached_does_not_increment_returned_metrics() {
         let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
 
         let obj = pool.get_object().unwrap();
-        let _value = obj.unwrap();
+        let _value = obj.into_detached();
 
         let metrics = pool.get_metrics();
         assert_eq!(metrics.total_retrieved, 1);
         assert_eq!(metrics.total_returned, 0);
+        assert_eq!(metrics.total_detached, 1);
         assert_eq!(metrics.active_objects, 0);
         assert_eq!(metrics.available_objects, 0);
+    }
+
+    #[test]
+    fn test_get_borrows_without_removing_from_pool() {
+        let pool = ObjectPool::new(vec![42], PoolConfiguration::default());
+        let obj = pool.get_object().unwrap();
+
+        assert_eq!(*obj.get(), 42);
+        assert_eq!(pool.active_count(), 1);
+
+        drop(obj);
+
+        // Object must be returned normally.
+        assert_eq!(pool.available_count(), 1);
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.total_returned, 1);
+        assert_eq!(metrics.total_detached, 0);
+    }
+
+    #[test]
+    fn test_get_mut_mutates_without_removing_from_pool() {
+        let pool = ObjectPool::new(vec![0], PoolConfiguration::default());
+        let mut obj = pool.get_object().unwrap();
+
+        *obj.get_mut() = 99;
+        assert_eq!(*obj.get(), 99);
+
+        drop(obj);
+
+        // Object must be returned normally.
+        assert_eq!(pool.available_count(), 1);
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.total_returned, 1);
+        assert_eq!(metrics.total_detached, 0);
     }
 
     #[test]
@@ -1567,4 +1685,307 @@ mod tests {
         drop(_a);
         assert_eq!(pool.available_count(), 1);
     }
+
+    // ── Validation on return ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_validation_failure_removes_object_and_increments_metric() {
+        // Validation rejects any value ≤ 0; we mutate the object to -1 before
+        // returning it so the validator fires.
+        let config = PoolConfiguration::new().with_validation(|x: &i32| *x > 0);
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+
+        {
+            let mut obj = pool.get_object().unwrap();
+            *obj.get_mut() = -1; // will fail validation on drop
+        }
+
+        // One object was rejected, so only 2 remain.
+        assert_eq!(pool.available_count(), 2);
+
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.validation_failures, 1);
+        assert_eq!(metrics.total_returned, 0); // failed validation ≠ returned
+    }
+
+    #[test]
+    fn test_validation_success_returns_object() {
+        let config = PoolConfiguration::new().with_validation(|x: &i32| *x > 0);
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+
+        {
+            let _obj = pool.get_object().unwrap(); // value is > 0, passes
+        }
+
+        assert_eq!(pool.available_count(), 3);
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.validation_failures, 0);
+        assert_eq!(metrics.total_returned, 1);
+    }
+
+    // ── PooledObject Debug impl ───────────────────────────────────────────────
+
+    #[test]
+    fn test_pooled_object_debug_does_not_panic() {
+        let pool = ObjectPool::new(vec![42i32], PoolConfiguration::default());
+        let obj = pool.get_object().unwrap();
+        let dbg = format!("{:?}", obj);
+        assert!(dbg.contains("PooledObject"));
+        assert!(dbg.contains("42"));
+    }
+
+    // ── DynamicObjectPool::with_initial returns objects to pool ──────────────
+
+    #[test]
+    fn test_dynamic_with_initial_returns_on_drop() {
+        let pool = DynamicObjectPool::with_initial(
+            || 99,
+            vec![1, 2, 3],
+            PoolConfiguration::new().with_max_pool_size(5),
+        );
+
+        assert_eq!(pool.available_count(), 3);
+        {
+            let _obj = pool.get_object().unwrap();
+            assert_eq!(pool.active_count(), 1);
+        }
+        assert_eq!(pool.available_count(), 3);
+    }
+
+    // ── QueryableObjectPool::try_get_object error propagation ────────────────
+
+    #[test]
+    fn test_queryable_try_get_propagates_max_active_error() {
+        let pool = QueryableObjectPool::new(
+            vec![1, 2, 3],
+            PoolConfiguration::new().with_max_active_objects(1),
+        );
+
+        let _obj = pool.get_object(|_| true).unwrap();
+        let result = pool.try_get_object(|_| true);
+        assert!(matches!(result, Err(PoolError::MaxActiveObjectsReached)));
+    }
+
+    #[test]
+    fn test_queryable_try_get_returns_none_on_no_match() {
+        let pool = QueryableObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        let result = pool.try_get_object(|x| *x == 99);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    // ── DynamicObjectPool::try_get_object full → Ok(None) ────────────────────
+
+    #[test]
+    fn test_dynamic_try_get_returns_none_when_full() {
+        let pool = DynamicObjectPool::new(
+            || 0,
+            PoolConfiguration::new().with_max_pool_size(1),
+        );
+
+        let _obj = pool.get_object().unwrap(); // fills capacity
+        let result = pool.try_get_object();
+        assert!(matches!(result, Ok(None)));
+    }
+
+    // ── Idle-timeout eviction ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_idle_timeout_eviction() {
+        use std::thread;
+
+        let config = PoolConfiguration::new()
+            .with_idle_timeout(Duration::from_millis(50));
+
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+        thread::sleep(Duration::from_millis(80));
+
+        // On checkout the expired objects are skipped.
+        let result = pool.try_get_object().unwrap();
+        assert!(result.is_none() || pool.available_count() < 3);
+    }
+
+    // ── Combined TTL + idle-timeout eviction ──────────────────────────────────
+
+    #[test]
+    fn test_combined_ttl_idle_eviction_via_evict_expired() {
+        use std::thread;
+
+        let config = PoolConfiguration::new()
+            .with_ttl(Duration::from_millis(50))
+            .with_idle_timeout(Duration::from_secs(300)); // idle won't fire
+
+        let pool = ObjectPool::new(vec![1, 2, 3], config);
+        thread::sleep(Duration::from_millis(80));
+
+        let evicted = pool.evict_expired();
+        assert_eq!(evicted, 3);
+        assert_eq!(pool.available_count(), 0);
+    }
+
+    // ── evict_expired / drain on delegating pool types ────────────────────────
+
+    #[test]
+    fn test_queryable_evict_expired_and_drain() {
+        use std::thread;
+
+        let config = PoolConfiguration::new()
+            .with_ttl(Duration::from_millis(50));
+        let pool = QueryableObjectPool::new(vec![1, 2, 3], config);
+        thread::sleep(Duration::from_millis(80));
+
+        let evicted = pool.evict_expired();
+        assert_eq!(evicted, 3);
+        assert_eq!(pool.available_count(), 0);
+
+        // Drain on empty pool returns empty vec without panic.
+        let drained = pool.drain();
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn test_dynamic_evict_and_drain() {
+        use std::thread;
+
+        let config = PoolConfiguration::new()
+            .with_ttl(Duration::from_millis(50))
+            .with_max_pool_size(5);
+        let pool = DynamicObjectPool::with_initial(|| 0, vec![1, 2, 3], config);
+        thread::sleep(Duration::from_millis(80));
+
+        let evicted = pool.evict_expired();
+        assert_eq!(evicted, 3);
+
+        let drained = pool.drain();
+        assert!(drained.is_empty());
+    }
+
+    // ── metrics export on delegating pool types ───────────────────────────────
+
+    #[test]
+    fn test_queryable_export_metrics() {
+        let pool = QueryableObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+        let _ = pool.get_object(|_| true).unwrap();
+
+        let map = pool.export_metrics();
+        assert!(map.contains_key("total_retrieved"));
+        assert_eq!(map.get("total_retrieved").unwrap(), "1");
+    }
+
+    #[test]
+    fn test_dynamic_export_metrics() {
+        let pool = DynamicObjectPool::new(|| 1, PoolConfiguration::new().with_max_pool_size(5));
+        let _ = pool.get_object().unwrap();
+
+        let map = pool.export_metrics();
+        assert!(map.contains_key("total_retrieved"));
+        assert_eq!(map.get("total_retrieved").unwrap(), "1");
+    }
+
+    // ── total_detached in metrics map and Prometheus ──────────────────────────
+
+    #[test]
+    fn test_export_metrics_includes_total_detached() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::default());
+
+        let obj = pool.get_object().unwrap();
+        let _ = obj.into_detached();
+
+        let map = pool.export_metrics();
+        assert!(map.contains_key("total_detached"));
+        assert_eq!(map.get("total_detached").unwrap(), "1");
+    }
+
+    #[test]
+    fn test_prometheus_export_includes_detached_counter() {
+        let pool = ObjectPool::new(vec![1], PoolConfiguration::default());
+        let obj = pool.get_object().unwrap();
+        let _ = obj.into_detached();
+
+        let prom = pool.export_metrics_prometheus("detach_pool", None);
+        assert!(prom.contains("objectpool_objects_detached_total"));
+        assert!(prom.contains("detach_pool"));
+    }
+
+    // ── warmup capped at capacity ─────────────────────────────────────────────
+
+    #[test]
+    fn test_warmup_capped_at_capacity() {
+        let pool = DynamicObjectPool::new(
+            || 0,
+            PoolConfiguration::new().with_max_pool_size(3),
+        );
+
+        // Request more than capacity; only 3 should be created.
+        pool.warmup(100).unwrap();
+        assert_eq!(pool.available_count(), 3);
+    }
+
+    // ── concurrent DynamicObjectPool creation stays within capacity ──────────
+
+    #[tokio::test]
+    async fn test_dynamic_pool_concurrent_creation_does_not_exceed_capacity() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(DynamicObjectPool::new(
+            || 0u32,
+            PoolConfiguration::new().with_max_pool_size(5),
+        ));
+
+        let mut handles = vec![];
+        for _ in 0..20 {
+            let p = Arc::clone(&pool);
+            handles.push(tokio::spawn(async move { p.get_object() }));
+        }
+
+        let mut objects = vec![];
+        for h in handles {
+            if let Ok(Ok(obj)) = h.await {
+                objects.push(obj);
+            }
+        }
+
+        // Total live objects (active + available) must never exceed capacity=5.
+        assert!(pool.active_count() + pool.available_count() <= 5);
+        // All successfully obtained objects came from within capacity.
+        assert!(objects.len() <= 5);
+    }
+
+    // ── QueryableObjectPool::get_object_async fails fast on errors ────────────
+
+    #[tokio::test]
+    async fn test_queryable_async_fails_fast_on_max_active() {
+        use std::time::Instant;
+
+        let pool = QueryableObjectPool::new(
+            vec![1, 2],
+            PoolConfiguration::new()
+                .with_timeout(Duration::from_secs(2))
+                .with_max_active_objects(1),
+        );
+        let _obj = pool.get_object(|_| true).unwrap();
+
+        let start = Instant::now();
+        let result = pool.get_object_async(|_| true).await;
+        assert!(start.elapsed() < Duration::from_millis(200));
+        assert!(matches!(result, Err(PoolError::MaxActiveObjectsReached)));
+    }
+
+    // ── DynamicObjectPool::get_object_async timeout ───────────────────────────
+
+    #[tokio::test]
+    async fn test_dynamic_async_timeout_when_full() {
+        let pool = DynamicObjectPool::new(
+            || 0,
+            PoolConfiguration::new()
+                .with_max_pool_size(1)
+                .with_timeout(Duration::from_millis(60)),
+        );
+
+        let _obj = pool.get_object().unwrap(); // fills capacity
+
+        let result = pool.get_object_async().await;
+        assert!(matches!(result, Err(PoolError::Timeout(_))));
+    }
 }
+
+
