@@ -144,3 +144,76 @@ impl Default for HealthTracker {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn healthy_pool_has_no_warnings() {
+        let h = HealthStatus::new(5, 2, 10, false);
+        assert!(h.is_healthy);
+        assert!(h.is_healthy());
+        assert!(h.warnings.is_empty());
+        assert_eq!(h.warning_count, 0);
+        assert!(!h.circuit_breaker_open);
+        assert_eq!(h.available_objects, 5);
+        assert_eq!(h.active_objects, 2);
+        assert_eq!(h.total_capacity, 10);
+        assert!((h.utilization - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn high_utilization_triggers_warning_and_unhealthy() {
+        // 91 / 100 = 91 % > 90 %
+        let h = HealthStatus::new(9, 91, 100, false);
+        assert!(!h.is_healthy);
+        assert!(h.warnings.iter().any(|w| w.contains("utilization") || w.contains("Utilization")));
+    }
+
+    #[test]
+    fn exactly_90_percent_utilization_is_healthy() {
+        // 90 / 100 = 0.90 — not *greater than* 0.9, so no warning
+        let h = HealthStatus::new(10, 90, 100, false);
+        assert!(h.is_healthy);
+    }
+
+    #[test]
+    fn empty_pool_adds_warning_but_remains_healthy() {
+        let h = HealthStatus::new(0, 0, 5, false);
+        // No active objects → utilization = 0 → still healthy
+        assert!(h.is_healthy);
+        assert!(h.warnings.iter().any(|w| w.contains("empty") || w.contains("Empty")));
+    }
+
+    #[test]
+    fn circuit_breaker_open_is_unhealthy() {
+        let h = HealthStatus::new(3, 0, 5, true);
+        assert!(!h.is_healthy);
+        assert!(h.circuit_breaker_open);
+        assert!(h.warnings.iter().any(|w| w.contains("Circuit") || w.contains("circuit")));
+    }
+
+    #[test]
+    fn zero_capacity_gives_zero_utilization() {
+        let h = HealthStatus::new(0, 0, 0, false);
+        assert_eq!(h.utilization, 0.0);
+        // "Pool is empty" warning only fires when capacity > 0
+        assert!(h.warnings.iter().all(|w| !w.contains("empty") && !w.contains("Empty")));
+    }
+
+    #[test]
+    fn multiple_issues_accumulate_warnings() {
+        // 100% utilization AND circuit breaker open
+        let h = HealthStatus::new(0, 10, 10, true);
+        assert!(!h.is_healthy);
+        assert!(h.warning_count >= 2);
+    }
+
+    #[test]
+    fn warning_count_matches_warnings_vec_len() {
+        let h = HealthStatus::new(0, 10, 10, true);
+        assert_eq!(h.warning_count, h.warnings.len());
+    }
+}
+

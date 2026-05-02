@@ -130,3 +130,156 @@ impl<T> EvictionTracker<T> {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+
+    // ── ObjectMetadata ────────────────────────────────────────────────────────
+
+    #[test]
+    fn none_policy_never_expires() {
+        let meta = ObjectMetadata::new();
+        assert!(!meta.is_expired(&EvictionPolicy::None));
+        thread::sleep(Duration::from_millis(10));
+        assert!(!meta.is_expired(&EvictionPolicy::None));
+    }
+
+    #[test]
+    fn ttl_policy_not_yet_expired() {
+        let meta = ObjectMetadata::new();
+        assert!(!meta.is_expired(&EvictionPolicy::TimeToLive(Duration::from_secs(60))));
+    }
+
+    #[test]
+    fn ttl_policy_expires_after_duration() {
+        let meta = ObjectMetadata::new();
+        thread::sleep(Duration::from_millis(30));
+        assert!(meta.is_expired(&EvictionPolicy::TimeToLive(Duration::from_millis(20))));
+    }
+
+    #[test]
+    fn idle_timeout_not_yet_expired() {
+        let meta = ObjectMetadata::new();
+        assert!(!meta.is_expired(&EvictionPolicy::IdleTimeout(Duration::from_secs(60))));
+    }
+
+    #[test]
+    fn idle_timeout_expires_after_idle() {
+        let meta = ObjectMetadata::new();
+        thread::sleep(Duration::from_millis(30));
+        assert!(meta.is_expired(&EvictionPolicy::IdleTimeout(Duration::from_millis(20))));
+    }
+
+    #[test]
+    fn idle_timeout_stays_fresh_after_touch() {
+        let mut meta = ObjectMetadata::new();
+        thread::sleep(Duration::from_millis(30));
+        meta.touch(); // reset last_used
+        // Should no longer be expired under a 50 ms idle policy.
+        assert!(!meta.is_expired(&EvictionPolicy::IdleTimeout(Duration::from_millis(50))));
+    }
+
+    #[test]
+    fn combined_expires_on_ttl() {
+        let meta = ObjectMetadata::new();
+        thread::sleep(Duration::from_millis(30));
+        // TTL expired, idle not yet expired.
+        assert!(meta.is_expired(&EvictionPolicy::Combined {
+            ttl: Duration::from_millis(20),
+            idle_timeout: Duration::from_secs(60),
+        }));
+    }
+
+    #[test]
+    fn combined_expires_on_idle() {
+        let meta = ObjectMetadata::new();
+        thread::sleep(Duration::from_millis(30));
+        // Idle expired, TTL not yet expired.
+        assert!(meta.is_expired(&EvictionPolicy::Combined {
+            ttl: Duration::from_secs(60),
+            idle_timeout: Duration::from_millis(20),
+        }));
+    }
+
+    #[test]
+    fn combined_not_expired_when_both_fresh() {
+        let meta = ObjectMetadata::new();
+        assert!(!meta.is_expired(&EvictionPolicy::Combined {
+            ttl: Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(60),
+        }));
+    }
+
+    // ── EvictionTracker ───────────────────────────────────────────────────────
+
+    #[test]
+    fn tracker_none_policy_skips_metadata_and_never_expires() {
+        let tracker = EvictionTracker::<i32>::new(EvictionPolicy::None);
+        tracker.track_object(1);
+        tracker.touch_object(1); // should be a no-op without panic
+        assert!(!tracker.is_expired(1));
+    }
+
+    #[test]
+    fn tracker_ttl_tracks_and_expires() {
+        let tracker = EvictionTracker::<i32>::new(EvictionPolicy::TimeToLive(Duration::from_millis(20)));
+        tracker.track_object(42);
+        assert!(!tracker.is_expired(42));
+
+        thread::sleep(Duration::from_millis(30));
+        assert!(tracker.is_expired(42));
+    }
+
+    #[test]
+    fn tracker_remove_clears_expiry_check() {
+        let tracker = EvictionTracker::<i32>::new(EvictionPolicy::TimeToLive(Duration::from_millis(20)));
+        tracker.track_object(7);
+        thread::sleep(Duration::from_millis(30));
+        assert!(tracker.is_expired(7));
+
+        tracker.remove_object(7);
+        // After removal, unknown id → not expired.
+        assert!(!tracker.is_expired(7));
+    }
+
+    #[test]
+    fn tracker_touch_resets_idle_timer() {
+        let tracker = EvictionTracker::<i32>::new(EvictionPolicy::IdleTimeout(Duration::from_millis(50)));
+        tracker.track_object(3);
+        thread::sleep(Duration::from_millis(30));
+        tracker.touch_object(3); // reset last_used
+        // Should not be expired yet.
+        assert!(!tracker.is_expired(3));
+    }
+
+    #[test]
+    fn tracker_get_expired_returns_expired_ids() {
+        let tracker = EvictionTracker::<i32>::new(EvictionPolicy::TimeToLive(Duration::from_millis(20)));
+        tracker.track_object(1);
+        tracker.track_object(2);
+        tracker.track_object(3);
+
+        thread::sleep(Duration::from_millis(30));
+
+        let mut expired = tracker.get_expired_objects();
+        expired.sort();
+        assert_eq!(expired, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn tracker_get_expired_none_policy_returns_empty() {
+        let tracker = EvictionTracker::<i32>::new(EvictionPolicy::None);
+        tracker.track_object(1);
+        assert!(tracker.get_expired_objects().is_empty());
+    }
+
+    #[test]
+    fn tracker_unknown_id_is_not_expired() {
+        let tracker = EvictionTracker::<i32>::new(EvictionPolicy::TimeToLive(Duration::from_millis(1)));
+        // id 99 was never tracked
+        assert!(!tracker.is_expired(99));
+    }
+}
+

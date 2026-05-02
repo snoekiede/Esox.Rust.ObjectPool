@@ -6,16 +6,14 @@
 //! ## Features
 //!
 //! - Thread-safe object pooling with lock-free operations
-//! - Automatic return of objects via RAII (Drop trait)
+//! - Automatic return of objects via RAII ([`Drop`] trait)
 //! - Async support with timeout and cancellation
 //! - Queryable pools for finding objects matching predicates
 //! - Dynamic pools with factory methods
-//! - Health monitoring and metrics
-//! - Prometheus metrics export
+//! - Health monitoring and metrics (including Prometheus export)
 //! - Pool warm-up/pre-population
 //! - Eviction/TTL support
 //! - Circuit breaker pattern
-//! - Lifecycle hooks
 //!
 //! ## Quick Start
 //!
@@ -29,6 +27,40 @@
 //!     // Object automatically returned when `obj` goes out of scope
 //! }
 //! ```
+//!
+//! ## Working with `PooledObject<T>`
+//!
+//! [`PooledObject<T>`](PooledObject) is a smart pointer that returns its contents to the
+//! pool when dropped. It implements [`Deref`](std::ops::Deref) and
+//! [`DerefMut`](std::ops::DerefMut) so it can be used transparently wherever `&T` or
+//! `&mut T` are expected.
+//!
+//! Three explicit accessor methods are available:
+//!
+//! | Method | Returns | Pool effect |
+//! |--------|---------|-------------|
+//! | [`get()`](PooledObject::get) | `&T` | None — returned on drop |
+//! | [`get_mut()`](PooledObject::get_mut) | `&mut T` | None — returned on drop |
+//! | [`into_detached()`](PooledObject::into_detached) | `T` (owned) | **Permanently removed** |
+//!
+//! ```rust
+//! use esox_objectpool::ObjectPool;
+//!
+//! let pool = ObjectPool::new(vec![0], Default::default());
+//! let mut obj = pool.get_object().unwrap();
+//!
+//! *obj.get_mut() = 99;           // mutate — stays in pool
+//! assert_eq!(*obj.get(), 99);    // borrow — stays in pool
+//! drop(obj);                     // returned to pool as normal
+//!
+//! // Permanently take ownership (reduces pool capacity by 1):
+//! let obj2 = pool.get_object().unwrap();
+//! let value = obj2.into_detached();
+//! assert_eq!(value, 99);
+//! ```
+//!
+//! > **Note:** `unwrap()` on `PooledObject` is deprecated since 1.1.0.
+//! > Use [`into_detached()`](PooledObject::into_detached) instead.
 
 mod pool;
 mod config;

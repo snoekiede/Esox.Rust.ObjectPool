@@ -304,7 +304,38 @@ fn main() {
 }
 ```
 
-**`unwrap()`** — Consumes the `PooledObject` and returns the inner value *without* returning it to the pool. The object's active slot is released (so `max_active_objects` and metrics are updated correctly), but the object itself is permanently removed from pool capacity. Use this only when you intentionally want to take ownership and discard the object.
+`PooledObject<T>` implements `Deref<Target = T>` and `DerefMut`, so it works transparently
+wherever `T` is expected. The following explicit accessor methods are also available:
+
+| Method | Signature | Effect on pool |
+|--------|-----------|----------------|
+| `get()` | `&self -> &T` | None — object returned on drop |
+| `get_mut()` | `&mut self -> &mut T` | None — object returned on drop |
+| `into_detached()` | `self -> T` | **Permanently removes** from pool capacity |
+| ~~`unwrap()`~~ | ~~`self -> T`~~ | *Deprecated* — use `into_detached()` |
+
+**Borrowing without removing from pool** — `get()` and `get_mut()` let you read or
+mutate the value while the object remains tracked. The object is returned to the pool
+when the `PooledObject` is dropped as normal:
+
+```rust
+use objectpool::ObjectPool;
+
+fn main() {
+    let pool = ObjectPool::new(vec![0], Default::default());
+    let mut obj = pool.get_object().unwrap();
+
+    *obj.get_mut() = 42;          // mutate in-place
+    println!("{}", obj.get());    // borrow to read
+    drop(obj);                    // returned to pool
+    assert_eq!(pool.available_count(), 1);
+}
+```
+
+**Permanent ownership transfer** — `into_detached()` consumes the `PooledObject`,
+releases the active slot, and returns `T` directly. The object is **never** returned to
+the pool; pool capacity is permanently reduced by one. Use this only when you
+intentionally need to own `T` beyond the pool's lifetime:
 
 ```rust
 use objectpool::ObjectPool;
@@ -312,8 +343,10 @@ use objectpool::ObjectPool;
 fn main() {
     let pool = ObjectPool::new(vec![1], Default::default());
     let obj = pool.get_object().unwrap();
-    let value: i32 = obj.unwrap(); // Active slot freed; value is gone from the pool
+
+    let value: i32 = obj.into_detached(); // active slot freed; value detached permanently
     println!("{}", value);
+    assert_eq!(pool.available_count(), 0); // capacity gone
 }
 ```
 
@@ -431,7 +464,7 @@ This library is suitable for:
 - Real-time systems requiring predictable latency
 
 **Known Limitations:**
-- `PooledObject::unwrap()` permanently removes the object from pool capacity; the active slot is freed but the object is never returned. Avoid in hot paths where maintaining pool size matters.
+- `PooledObject::into_detached()` permanently removes the object from pool capacity; the active slot is freed but the object is never returned. Avoid in hot paths where maintaining pool size matters. (`unwrap()` is a deprecated alias for the same operation.)
 - `try_get_object_async()` is a thin async wrapper around the synchronous `try_get_object()` — it performs one non-blocking attempt and returns immediately. It does **not** poll or apply a timeout.
 - TTL/idle-timeout eviction is lazy (expired objects are filtered on checkout). For strict enforcement, call `evict_expired()` periodically from a background task.
 - `QueryableObjectPool::get_object()` drains the entire queue to scan for a matching object, then refills it. Concurrent callers serialise on the lock-free queue, making it unsuitable for high-throughput concurrent use.
@@ -451,7 +484,13 @@ cargo test --release  # With optimizations
 
 ## Version History
 
-### 1.0.0 (Current) - April 2026
+### 1.1.0 - May 2026
+- **`PooledObject::get()` / `get_mut()`** — explicit borrow accessors that do not affect pool state; the object is still returned on drop
+- **`PooledObject::into_detached()`** — explicit "permanent detach" API replacing the old `unwrap()` behaviour; makes ownership transfer intent clear at the call site
+- **`PooledObject::unwrap()` deprecated** — now an alias for `into_detached()`; emits a compiler warning directing to the new name
+- **`total_detached` metric** — tracks how often objects are permanently removed via `into_detached()`; exposed in `PoolMetrics`, `export_metrics()` map, and Prometheus output (`objectpool_objects_detached_total`)
+
+### 1.0.0 - April 2026 (initial release)
 - **Initial crates.io release** (Rust port of .NET EsoxSolutions.ObjectPool v4.0.0)
 - Thread-safe pooling with lock-free operations (`crossbeam::ArrayQueue` + `dashmap`)
 - Async support with tokio (`get_object_async`, `warmup_async`)

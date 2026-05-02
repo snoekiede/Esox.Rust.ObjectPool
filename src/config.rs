@@ -154,3 +154,100 @@ impl<T> PoolConfiguration<T> {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_values_are_sensible() {
+        let cfg = PoolConfiguration::<i32>::default();
+        assert_eq!(cfg.max_pool_size, 100);
+        assert_eq!(cfg.max_active_objects, None);
+        assert!(!cfg.validate_on_return);
+        assert!(cfg.validation_function.is_none());
+        assert!(cfg.operation_timeout.is_some());
+        assert!(cfg.time_to_live.is_none());
+        assert!(cfg.idle_timeout.is_none());
+        assert!(cfg.warmup_size.is_none());
+        assert!(!cfg.enable_circuit_breaker);
+        assert_eq!(cfg.circuit_breaker_threshold, 5);
+    }
+
+    #[test]
+    fn with_max_pool_size() {
+        let cfg = PoolConfiguration::<i32>::new().with_max_pool_size(42);
+        assert_eq!(cfg.max_pool_size, 42);
+    }
+
+    #[test]
+    fn with_max_active_objects() {
+        let cfg = PoolConfiguration::<i32>::new().with_max_active_objects(7);
+        assert_eq!(cfg.max_active_objects, Some(7));
+    }
+
+    #[test]
+    fn with_validation() {
+        let cfg = PoolConfiguration::<i32>::new().with_validation(|x| *x > 0);
+        assert!(cfg.validate_on_return);
+        assert!(cfg.validation_function.is_some());
+        // Verify the stored function works.
+        assert!(cfg.validation_function.unwrap()(&1));
+        assert!(!cfg.validation_function.unwrap()(&-1));
+    }
+
+    #[test]
+    fn with_timeout() {
+        let cfg = PoolConfiguration::<i32>::new().with_timeout(Duration::from_secs(5));
+        assert_eq!(cfg.operation_timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn with_ttl() {
+        let cfg = PoolConfiguration::<i32>::new().with_ttl(Duration::from_secs(60));
+        assert_eq!(cfg.time_to_live, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn with_idle_timeout() {
+        let cfg = PoolConfiguration::<i32>::new().with_idle_timeout(Duration::from_secs(30));
+        assert_eq!(cfg.idle_timeout, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn with_warmup() {
+        let cfg = PoolConfiguration::<i32>::new().with_warmup(20);
+        assert_eq!(cfg.warmup_size, Some(20));
+    }
+
+    #[test]
+    fn with_circuit_breaker() {
+        let cfg = PoolConfiguration::<i32>::new()
+            .with_circuit_breaker(3, Duration::from_secs(45));
+        assert!(cfg.enable_circuit_breaker);
+        assert_eq!(cfg.circuit_breaker_threshold, 3);
+        assert_eq!(cfg.circuit_breaker_timeout, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn builder_is_chainable() {
+        let cfg = PoolConfiguration::<i32>::new()
+            .with_max_pool_size(10)
+            .with_max_active_objects(5)
+            .with_timeout(Duration::from_secs(1))
+            .with_ttl(Duration::from_secs(60))
+            .with_idle_timeout(Duration::from_secs(30))
+            .with_warmup(3)
+            .with_circuit_breaker(2, Duration::from_secs(15));
+
+        assert_eq!(cfg.max_pool_size, 10);
+        assert_eq!(cfg.max_active_objects, Some(5));
+        assert_eq!(cfg.operation_timeout, Some(Duration::from_secs(1)));
+        assert_eq!(cfg.time_to_live, Some(Duration::from_secs(60)));
+        assert_eq!(cfg.idle_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(cfg.warmup_size, Some(3));
+        assert!(cfg.enable_circuit_breaker);
+        assert_eq!(cfg.circuit_breaker_threshold, 2);
+    }
+}
+
