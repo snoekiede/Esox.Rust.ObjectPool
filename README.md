@@ -9,8 +9,9 @@ High-performance, thread-safe object pool for Rust with automatic return of obje
 ## Features
 
 - **Thread-safe object pooling** with lock-free concurrent operations using `crossbeam`
+- **Atomic active-slot accounting** — `max_active_objects` is enforced via a CAS semaphore; the check and increment are a single atomic operation (no TOCTOU race)
 - **Automatic return of objects** via RAII (Drop trait) - no manual return needed
-- **Async support** with `async/await`, timeout, and cancellation via `tokio`
+- **Async support** with `async/await`, timeout, and jittered retry via `tokio`
 - **Queryable pools** for finding objects matching predicates
 - **Dynamic pools** with factory methods for on-demand object creation
 - **Health monitoring** with real-time status and utilization metrics
@@ -20,6 +21,7 @@ High-performance, thread-safe object pool for Rust with automatic return of obje
 - **Circuit Breaker** pattern for protecting against cascading failures
 - **Pool warm-up** for pre-population to eliminate cold-start latency
 - **Try* methods** for non-throwing retrieval patterns
+- **`#[must_use]`** on all query/observability methods — misuse caught at compile time
 - **High-performance** with O(1) get/return operations
 
 ## Installation
@@ -59,6 +61,7 @@ fn main() {
     }
     
     println!("Available: {}", pool.available_count());
+    println!("Capacity:  {}", pool.capacity());
 }
 ```
 
@@ -88,7 +91,7 @@ use objectpool::ObjectPool;
 async fn main() {
     let pool = ObjectPool::new(vec![1, 2, 3], Default::default());
     
-    // Async get with timeout
+    // Async get with timeout (uses jittered retry internally)
     let obj = pool.get_object_async().await.unwrap();
     println!("Got: {}", *obj);
 }
@@ -242,8 +245,8 @@ fn main() {
 
 ### Health Monitoring
 
-The health status now includes the circuit breaker state. A pool with an open
-circuit breaker is reported as unhealthy.
+The health status includes the circuit breaker state. A pool with an open circuit breaker
+is reported as unhealthy.
 
 ```rust
 fn main() {
@@ -252,6 +255,7 @@ fn main() {
     println!("Healthy: {}", health.is_healthy);
     println!("CB open: {}", health.circuit_breaker_open);
     println!("Utilization: {:.1}%", health.utilization * 100.0);
+    println!("Capacity: {}", pool.capacity());
     println!("Active: {}, Available: {}",
         health.active_objects, health.available_objects);
     for warning in &health.warnings {
@@ -269,9 +273,14 @@ use std::collections::HashMap;
 fn main() {
     let pool = ObjectPool::new(vec![1, 2, 3], Default::default());
 
-    // Standard metrics
-    let metrics = pool.export_metrics();
-    for (key, value) in metrics {
+    // Typed metrics struct
+    let metrics = pool.get_metrics();
+    println!("Retrieved: {}", metrics.total_retrieved);
+    println!("Detached:  {}", metrics.total_detached);
+
+    // Key-value map
+    let map = pool.export_metrics();
+    for (key, value) in &map {
         println!("{}: {}", key, value);
     }
 
@@ -304,15 +313,16 @@ fn main() {
 }
 ```
 
-`PooledObject<T>` implements `Deref<Target = T>` and `DerefMut`, so it works transparently
-wherever `T` is expected. The following explicit accessor methods are also available:
+`PooledObject<T>` implements `Deref<Target = T>`, `DerefMut`, `AsRef<T>`, and `AsMut<T>`,
+so it works transparently wherever `&T` or `&mut T` are expected.
+The following explicit accessor methods are also available:
 
 | Method | Signature | Effect on pool |
 |--------|-----------|----------------|
 | `get()` | `&self -> &T` | None — object returned on drop |
 | `get_mut()` | `&mut self -> &mut T` | None — object returned on drop |
 | `into_detached()` | `self -> T` | **Permanently removes** from pool capacity |
-| ~~`unwrap()`~~ | ~~`self -> T`~~ | *Deprecated* — use `into_detached()` |
+| ~~`unwrap()`~~ | ~~`self -> T`~~ | *Deprecated since 1.1.0* — use `into_detached()` |
 
 **Borrowing without removing from pool** — `get()` and `get_mut()` let you read or
 mutate the value while the object remains tracked. The object is returned to the pool
@@ -352,76 +362,90 @@ fn main() {
 
 ### `ObjectPool<T>`
 
-Fixed-size pool with pre-allocated objects.
+Fixed-size pool with pre-allocated objects. Passing `max_pool_size = 0` (or an empty
+`Vec` with the default config's size capped to 0) panics at construction time with a
+clear message.
 
 **Methods:**
-- `new(objects, config)` - Create pool with initial objects
-- `get_object()` - Get object (non-blocking; returns `Err(PoolError::PoolEmpty)` if empty, or `Err(PoolError::CircuitBreakerOpen)` / `Err(PoolError::MaxActiveObjectsReached)` for operational guards)
-- `try_get_object()` - Try to get object; returns `Ok(None)` **only** for an empty pool — operational errors (`CircuitBreakerOpen`, `MaxActiveObjectsReached`) are still returned as `Err`
-- `get_object_async()` - Async get with timeout; **non-retryable errors (`CircuitBreakerOpen`, `MaxActiveObjectsReached`) are returned immediately** without waiting for the timeout
-- `try_get_object_async()` - Thin async wrapper around `try_get_object()`; performs a single non-blocking attempt (no polling loop, no timeout)
-- `available_count()` - Number of objects currently available in the queue
-- `active_count()` - Number of objects currently checked out
-- `evict_expired()` - Proactively remove expired objects; returns count evicted
-- `drain()` - Remove and return all available objects (for graceful shutdown)
-- `get_health_status()` - Get health status (includes circuit breaker state)
-- `export_metrics()` - Export metrics as HashMap
-- `export_metrics_prometheus()` - Export in Prometheus format
+- `new(objects, config)` — Create pool with initial objects
+- `get_object()` — Get object (non-blocking; returns `Err(PoolError::PoolEmpty)` if empty, or `Err(PoolError::CircuitBreakerOpen)` / `Err(PoolError::MaxActiveObjectsReached)` for operational guards). Marked `#[must_use]`.
+- `try_get_object()` — Try to get object; returns `Ok(None)` **only** for an empty pool — operational errors (`CircuitBreakerOpen`, `MaxActiveObjectsReached`) are still returned as `Err`. Marked `#[must_use]`.
+- `get_object_async()` — Async get with jittered retry (5–20 ms) and timeout; **non-retryable errors (`CircuitBreakerOpen`, `MaxActiveObjectsReached`) are returned immediately** without waiting for the timeout
+- `try_get_object_async()` — Thin async wrapper around `try_get_object()`; performs a single non-blocking attempt (no polling loop, no timeout)
+- `available_count()` — Number of objects currently available in the queue
+- `active_count()` — Number of objects currently checked out
+- `capacity()` — Maximum number of objects the pool can hold (set at construction time)
+- `evict_expired()` — Proactively remove expired objects; returns count evicted (push-to-requeue failures are tracked separately in `queue_push_failures` and are **not** counted as evictions)
+- `drain()` — Remove and return all available objects (for graceful shutdown)
+- `get_health_status()` — Get health status (includes circuit breaker state)
+- `get_metrics()` — Get typed `PoolMetrics` struct
+- `export_metrics()` — Export metrics as `HashMap<String, String>`
+- `export_metrics_prometheus()` — Export in Prometheus format
 
 ### `QueryableObjectPool<T>`
 
 Pool that supports finding objects by predicate.
 
 **Methods:**
-- `new(objects, config)` - Create queryable pool
-- `get_object(predicate)` - Find object matching predicate; O(n) worst case
-- `try_get_object(predicate)` - Returns `Ok(None)` only when no match is found; propagates operational errors as `Err`
-- `get_object_async(predicate)` - Async find with timeout; non-retryable errors fail fast
+- `new(objects, config)` — Create queryable pool
+- `get_object(predicate)` — Find object matching predicate; O(n) worst case. `MaxActiveObjectsReached` is enforced atomically before the scan.
+- `try_get_object(predicate)` — Returns `Ok(None)` only when no match is found; propagates operational errors as `Err`
+- `get_object_async(predicate)` — Async find with jittered retry and timeout; non-retryable errors fail fast
+- `capacity()` — Maximum pool size
+- `available_count()` / `active_count()` — Observe pool state
+- `get_metrics()` — Typed metrics struct
+- `export_metrics()` / `export_metrics_prometheus()` — Metrics export
+- `evict_expired()` / `drain()` — Eviction and shutdown helpers
 
 ### `DynamicObjectPool<T>`
 
 Pool that creates objects on-demand using a factory function.
 
 **Methods:**
-- `new(factory, config)` - Create with factory function
-- `with_initial(factory, objects, config)` - Create with initial objects and factory
-- `get_object()` - Returns an available pooled object if one exists; calls the factory to create a new one **only** when the pool is empty *and* the active + available count is below capacity (enforced with a `Mutex` to prevent concurrent over-creation). `CircuitBreakerOpen` and `MaxActiveObjectsReached` are propagated immediately — the factory is **not** called.
-- `available_count()` / `active_count()` - Observe pool state
-- `evict_expired()` - Proactively remove expired objects
-- `drain()` - Remove and return all available objects
-- `warmup(count)` - Pre-populate pool (capped at pool capacity)
-- `warmup_async(count)` - Async pre-population
+- `new(factory, config)` — Create with factory function
+- `with_initial(factory, objects, config)` — Create with initial objects and factory
+- `get_object()` — Returns an available pooled object if one exists; calls the factory to create a new one **only** when the pool is empty *and* the active + available count is below `capacity`. Enforced with a `Mutex` (prevents TOCTOU over-creation) + CAS slot reservation (prevents `MaxActiveObjectsReached` race). `CircuitBreakerOpen` and `MaxActiveObjectsReached` are propagated immediately — the factory is **not** called.
+- `try_get_object()` — Returns `Ok(None)` when pool is at capacity; propagates other errors
+- `get_object_async()` — Async get with jittered retry and timeout
+- `capacity()` — Maximum pool size
+- `available_count()` / `active_count()` — Observe pool state
+- `get_metrics()` — Typed metrics struct
+- `export_metrics()` / `export_metrics_prometheus()` — Metrics export
+- `evict_expired()` — Proactively remove expired objects
+- `drain()` — Remove and return all available objects
+- `warmup(count)` — Pre-populate pool (capped at pool capacity; eviction entries are cleaned up on push failure)
+- `warmup_async(count)` — Async pre-population
 
 ### `PoolConfiguration<T>`
 
 Configuration options for pool behavior.
 
 **Builder Methods:**
-- `with_max_pool_size(size)` - Set maximum pool capacity
-- `with_max_active_objects(count)` - Limit concurrent checkouts
-- `with_validation(func)` - Enable validation on return
-- `with_timeout(duration)` - Set async operation timeout
-- `with_ttl(duration)` - Set time-to-live for objects
-- `with_idle_timeout(duration)` - Set idle timeout
-- `with_warmup(size)` - Set warm-up size
-- `with_circuit_breaker(threshold, timeout)` - Enable circuit breaker
+- `with_max_pool_size(size)` — Set maximum pool capacity (must be ≥ 1)
+- `with_max_active_objects(count)` — Limit concurrent checkouts (enforced with an atomic CAS semaphore)
+- `with_validation(func)` — Enable validation on return
+- `with_timeout(duration)` — Set async operation timeout
+- `with_ttl(duration)` — Set time-to-live for objects
+- `with_idle_timeout(duration)` — Set idle timeout
+- `with_warmup(size)` — Set warm-up size
+- `with_circuit_breaker(threshold, timeout)` — Enable circuit breaker
 
 ## Performance Characteristics
 
 | Operation | Complexity | Implementation |
 |-----------|-----------|----------------|
-| `get_object()` | O(1) | Lock-free `ArrayQueue` pop |
-| `return_object()` | O(1) | Lock-free `ArrayQueue` push |
-| `get_object(query)` | O(n) worst | Early exit optimization |
-| `try_get_object()` | O(1) | Non-blocking variant with error propagation |
+| `get_object()` | O(1) amortized | Lock-free `ArrayQueue` pop + CAS slot reservation |
+| `return_object()` | O(1) | Lock-free `ArrayQueue` push + atomic decrement |
+| `get_object(query)` | O(n) worst | Full scan with early-exit once match is found |
+| `try_get_object()` | O(1) | Non-blocking variant with full error propagation |
 
 ## Thread Safety
 
 All operations are thread-safe using:
-- **`crossbeam::queue::ArrayQueue`** - Lock-free MPMC queue
-- **`dashmap::DashMap`** - Concurrent hash map
-- **`parking_lot::RwLock`** - Fast reader-writer locks
-- **`std::sync::atomic`** - Atomic operations for counters
+- **`crossbeam::queue::ArrayQueue`** — Lock-free MPMC queue for the object inventory
+- **`dashmap::DashMap`** — Concurrent hash map for eviction metadata
+- **`std::sync::atomic::AtomicUsize`** (CAS loop) — Race-free active-slot semaphore; eliminates the TOCTOU window that existed with a read-then-increment pattern
+- **`std::sync::Mutex`** — Serialises dynamic object creation in `DynamicObjectPool`
 
 Tested under high concurrency with zero data races (verified by Rust's ownership system).
 
@@ -429,7 +453,7 @@ Tested under high concurrency with zero data races (verified by Rust's ownership
 
 | Feature | .NET | Rust | Notes |
 |---------|------|------|-------|
-| Thread Safety | `ConcurrentStack` | `ArrayQueue` + `DashMap` | Lock-free in both |
+| Thread Safety | `ConcurrentStack` | `ArrayQueue` + atomics | Lock-free in both |
 | Auto Return | `IDisposable` | `Drop` trait | RAII pattern |
 | Async | `Task<T>` | `async/await` with `tokio` | Native async |
 | Generics | Full support | Full support | Rust has more constraints |
@@ -469,6 +493,7 @@ This library is suitable for:
 - TTL/idle-timeout eviction is lazy (expired objects are filtered on checkout). For strict enforcement, call `evict_expired()` periodically from a background task.
 - `QueryableObjectPool::get_object()` drains the entire queue to scan for a matching object, then refills it. Concurrent callers serialise on the lock-free queue, making it unsuitable for high-throughput concurrent use.
 - When the return-to-pool queue push fails after retries (e.g. under extreme contention with a full queue), the object is discarded and the `queue_push_failures` metric is incremented. This permanently reduces pool capacity.
+- `ObjectPool::new()` panics if the resolved capacity is 0 (i.e. empty `Vec` + `max_pool_size = 0`). Always provide at least one initial object or set `max_pool_size ≥ 1`.
 - No built-in integration with web frameworks (e.g. Actix, Axum, Rocket).
 - Health checks and metrics endpoints must be manually wired up.
 - Async operations are not cancelable via the pool API (use `tokio::time::timeout` externally if needed).
@@ -483,6 +508,19 @@ cargo test --release  # With optimizations
 ```
 
 ## Version History
+
+### 1.1.1 - May 2026
+- **`#[must_use]`** on all pool query / observability methods — calling `get_object`, `try_get_object`, `get_metrics`, `get_health_status`, `available_count`, `active_count`, `capacity`, `evict_expired`, `drain` and variants without using the result now produces a compiler warning
+- **`capacity()` method** added on `ObjectPool`, `QueryableObjectPool`, and `DynamicObjectPool`
+- **`get_metrics()` delegated** from `QueryableObjectPool` and `DynamicObjectPool` (previously only accessible via the string-map `export_metrics()`)
+- **`AsRef<T>` / `AsMut<T>`** implemented for `PooledObject<T>` — works with any API accepting `impl AsRef<T>`
+- **`max_active_objects` TOCTOU race fixed** — replaced `DashMap.len() >= max` with a CAS-loop atomic semaphore; check and increment are now one atomic operation
+- **`warmup` / `warmup_async` eviction leak fixed** — eviction tracker entries are now cleaned up if the queue push fails
+- **`evict_expired` miscount fixed** — objects lost to a requeue push failure are no longer counted as evictions; they increment `queue_push_failures` only
+- **`HealthTracker` removed** — the struct was populated on every get/return but its data was never read; its `Arc` and atomic overhead are gone
+- **Zero-capacity guard** — `ObjectPool::new()` panics with a clear message when the resolved capacity is 0
+- **Async retry jitter** — `get_object_async` on all three pool types now uses a 5–20 ms staggered delay instead of a fixed 10 ms, reducing thundering-herd wake-ups
+- **Silent `let _` in constructor replaced** with a `panic!` that includes the object index (was always unreachable but now explicit)
 
 ### 1.1.0 - May 2026
 - **`PooledObject::get()` / `get_mut()`** — explicit borrow accessors that do not affect pool state; the object is still returned on drop
@@ -512,10 +550,10 @@ cargo test --release  # With optimizations
 .NET                          →  Rust
 ─────────────────────────────────────────────────────────
 IDisposable                   →  Drop trait
-ConcurrentStack<T>            →  ArrayQueue<T> + DashMap
+ConcurrentStack<T>            →  ArrayQueue<T> (lock-free MPMC)
 Task<T>                       →  Future with tokio
 lock { }                      →  Mutex/RwLock (RAII locks)
-Interlocked.Increment         →  AtomicUsize::fetch_add
+Interlocked.Increment         →  AtomicUsize::fetch_add / CAS
 IServiceCollection (DI)       →  Manual or crates like `shaku`
 IHealthCheck                  →  Custom trait
 Nullable<T>                   →  Option<T>

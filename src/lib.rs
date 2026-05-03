@@ -7,13 +7,14 @@
 //!
 //! - Thread-safe object pooling with lock-free operations
 //! - Automatic return of objects via RAII ([`Drop`] trait)
-//! - Async support with timeout and cancellation
+//! - Async support with timeout and jittered retry
 //! - Queryable pools for finding objects matching predicates
 //! - Dynamic pools with factory methods
 //! - Health monitoring and metrics (including Prometheus export)
 //! - Pool warm-up/pre-population
 //! - Eviction/TTL support
 //! - Circuit breaker pattern
+//! - [`#[must_use]`](must_use) on all observability methods
 //!
 //! ## Quick Start
 //!
@@ -26,14 +27,15 @@
 //!     println!("Got: {}", *obj);
 //!     // Object automatically returned when `obj` goes out of scope
 //! }
+//! println!("capacity={} available={}", pool.capacity(), pool.available_count());
 //! ```
 //!
 //! ## Working with `PooledObject<T>`
 //!
 //! [`PooledObject<T>`](PooledObject) is a smart pointer that returns its contents to the
-//! pool when dropped. It implements [`Deref`](std::ops::Deref) and
-//! [`DerefMut`](std::ops::DerefMut) so it can be used transparently wherever `&T` or
-//! `&mut T` are expected.
+//! pool when dropped. It implements [`Deref`](std::ops::Deref),
+//! [`DerefMut`](std::ops::DerefMut), [`AsRef<T>`](AsRef), and [`AsMut<T>`](AsMut) so it
+//! works transparently wherever `&T` or `&mut T` are expected.
 //!
 //! Three explicit accessor methods are available:
 //!
@@ -61,6 +63,36 @@
 //!
 //! > **Note:** `unwrap()` on `PooledObject` is deprecated since 1.1.0.
 //! > Use [`into_detached()`](PooledObject::into_detached) instead.
+//!
+//! ## Observing Pool State
+//!
+//! All three pool types expose the same set of observability methods:
+//!
+//! ```rust
+//! use esox_objectpool::{ObjectPool, PoolConfiguration};
+//!
+//! let pool = ObjectPool::new(vec![1, 2, 3],
+//!     PoolConfiguration::new().with_max_pool_size(10));
+//!
+//! println!("capacity={}", pool.capacity());          // 10
+//! println!("available={}", pool.available_count());  // 3
+//! println!("active={}", pool.active_count());        // 0
+//!
+//! let metrics = pool.get_metrics();
+//! println!("retrieved={}", metrics.total_retrieved);
+//!
+//! let health = pool.get_health_status();
+//! println!("healthy={} utilization={:.0}%",
+//!     health.is_healthy, health.utilization * 100.0);
+//! ```
+//!
+//! ## API Changes in 1.1.1
+//!
+//! - `ObjectPool` and `PooledObject` now implement `AsRef<T>` and `AsMut<T>`.
+//! - `ObjectPool::capacity()` method added.
+//! - Jitter support in async operations.
+//! - All observability methods are annotated with `#[must_use]`.
+//! - `unwrap()` on `PooledObject` is deprecated, use `into_detached()` instead.
 
 mod pool;
 mod config;
