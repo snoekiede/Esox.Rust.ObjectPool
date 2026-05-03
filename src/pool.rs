@@ -2,13 +2,12 @@
 
 use crate::config::PoolConfiguration;
 use crate::errors::{PoolError, PoolResult};
-use crate::health::{HealthStatus, HealthTracker};
+use crate::health::HealthStatus;
 use crate::metrics::{MetricsExporter, MetricsTracker, PoolMetrics};
 use crate::eviction::{EvictionPolicy, EvictionTracker};
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 
 use crossbeam::queue::ArrayQueue;
-use dashmap::DashMap;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -153,6 +152,18 @@ impl<T> PooledObject<T> {
     }
 }
 
+impl<T> AsRef<T> for PooledObject<T> {
+    fn as_ref(&self) -> &T {
+        self.get()
+    }
+}
+
+impl<T> AsMut<T> for PooledObject<T> {
+    fn as_mut(&mut self) -> &mut T {
+        self.get_mut()
+    }
+}
+
 impl<T> Deref for PooledObject<T> {
     type Target = T;
     
@@ -195,10 +206,11 @@ impl<T> Drop for PooledObject<T> {
 /// ```
 pub struct ObjectPool<T: Send> {
     available: Arc<ArrayQueue<(T, usize)>>,
-    active: Arc<DashMap<usize, ()>>,
+    /// Number of objects currently checked out. Also acts as a CAS semaphore
+    /// for `max_active_objects` enforcement so the check+increment is atomic.
+    active_count: Arc<AtomicUsize>,
     config: Arc<PoolConfiguration<T>>,
     metrics: Arc<MetricsTracker>,
-    health: Arc<HealthTracker>,
     eviction: Arc<EvictionTracker<T>>,
     circuit_breaker: Option<Arc<CircuitBreaker>>,
     next_id: Arc<AtomicUsize>,
@@ -221,14 +233,12 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// ```
     pub fn new(objects: Vec<T>, config: PoolConfiguration<T>) -> Self {
         let capacity = objects.len().max(config.max_pool_size);
+        assert!(capacity > 0, "ObjectPool capacity must be at least 1");
         let available = Arc::new(ArrayQueue::new(capacity));
         
         let eviction_policy = if let Some(ttl) = config.time_to_live {
             if let Some(idle) = config.idle_timeout {
-                EvictionPolicy::Combined {
-                    ttl,
-                    idle_timeout: idle,
-                }
+                EvictionPolicy::Combined { ttl, idle_timeout: idle }
             } else {
                 EvictionPolicy::TimeToLive(ttl)
             }
@@ -240,10 +250,14 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         
         let eviction = Arc::new(EvictionTracker::new(eviction_policy));
         
-        // Add objects to pool
+        // Add objects to pool; queue is sized to fit all of them, so push cannot fail.
         for (idx, obj) in objects.into_iter().enumerate() {
             eviction.track_object(idx);
-            let _ = available.push((obj, idx));
+            // Queue is sized to fit all objects; push can only fail if the queue is full,
+            // which is impossible here.
+            available.push((obj, idx)).unwrap_or_else(|_| {
+                panic!("BUG: ObjectPool queue full during construction for object #{idx}")
+            });
         }
         
         let circuit_breaker = if config.enable_circuit_breaker {
@@ -257,10 +271,9 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         
         Self {
             available,
-            active: Arc::new(DashMap::new()),
+            active_count: Arc::new(AtomicUsize::new(0)),
             config: Arc::new(config),
             metrics: Arc::new(MetricsTracker::new()),
-            health: Arc::new(HealthTracker::new()),
             eviction,
             circuit_breaker,
             next_id: Arc::new(AtomicUsize::new(capacity)),
@@ -285,10 +298,12 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// let obj = pool.get_object().unwrap();
     /// assert_eq!(*obj, 42);
     /// ```
+    #[must_use = "the pool object must be used or explicitly dropped"]
     pub fn get_object(&self) -> PoolResult<PooledObject<T>> {
         self.check_circuit_breaker()?;
-        self.check_max_active()?;
-        
+        // Atomically reserve an active slot (enforces max_active_objects without a TOCTOU race).
+        self.try_acquire_active_slot()?;
+
         // Try to get available object
         loop {
             match self.available.pop() {
@@ -299,11 +314,9 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
                         continue;
                     }
                     
-                    self.active.insert(id, ());
                     self.eviction.touch_object(id);
                     self.metrics.total_retrieved.fetch_add(1, Ordering::Relaxed);
-                    self.health.increment_retrieved();
-                    
+
                     if let Some(ref cb) = self.circuit_breaker {
                         cb.record_success();
                     }
@@ -313,9 +326,10 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
                     return Ok(PooledObject::new(obj, id, return_fn, detach_fn));
                 }
                 None => {
+                    // Release the slot we reserved — no object was obtained.
+                    self.active_count.fetch_sub(1, Ordering::AcqRel);
                     self.metrics.pool_empty_events.fetch_add(1, Ordering::Relaxed);
-                    self.health.increment_empty();
-                    
+
                     if let Some(ref cb) = self.circuit_breaker {
                         cb.record_failure();
                     }
@@ -346,6 +360,7 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// let obj2 = pool.try_get_object().unwrap();
     /// assert!(obj2.is_none()); // Pool empty
     /// ```
+    #[must_use = "check Ok(None) to detect empty pool"]
     pub fn try_get_object(&self) -> PoolResult<Option<PooledObject<T>>> {
         match self.get_object() {
             Ok(obj) => Ok(Some(obj)),
@@ -359,11 +374,15 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         let timeout = self.config.operation_timeout.unwrap_or(Duration::from_secs(30));
         
         tokio::time::timeout(timeout, async {
+            let mut attempt: u64 = 0;
             loop {
                 match self.try_get_object() {
                     Ok(Some(obj)) => return Ok(obj),
                     Ok(None) => {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        // Small jitter (5–20 ms) avoids a thundering-herd wake-up.
+                        let delay = 5 + (attempt % 4) * 5;
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        attempt = attempt.wrapping_add(1);
                     }
                     Err(err) => return Err(err),
                 }
@@ -379,9 +398,10 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     }
     
     /// Get health status
+    #[must_use]
     pub fn get_health_status(&self) -> HealthStatus {
         let available = self.available.len();
-        let active = self.active.len();
+        let active = self.active_count.load(Ordering::Relaxed);
         let cb_open = self
             .circuit_breaker
             .as_ref()
@@ -390,13 +410,15 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         HealthStatus::new(available, active, self.capacity, cb_open)
     }
     
-    /// Export metrics
+    /// Export metrics as a key-value map
+    #[must_use]
     pub fn export_metrics(&self) -> HashMap<String, String> {
         let metrics = self.get_metrics();
         metrics.export()
     }
     
     /// Export metrics in Prometheus format
+    #[must_use]
     pub fn export_metrics_prometheus(
         &self,
         pool_name: &str,
@@ -407,22 +429,31 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     }
     
     /// Get pool metrics
+    #[must_use]
     pub fn get_metrics(&self) -> PoolMetrics {
         self.metrics.get_metrics(
-            self.active.len(),
+            self.active_count.load(Ordering::Relaxed),
             self.available.len(),
             self.capacity,
         )
     }
     
-    /// Get available count
+    /// Number of objects currently available in the queue
+    #[must_use]
     pub fn available_count(&self) -> usize {
         self.available.len()
     }
 
-    /// Get active count
+    /// Number of objects currently checked out
+    #[must_use]
     pub fn active_count(&self) -> usize {
-        self.active.len()
+        self.active_count.load(Ordering::Relaxed)
+    }
+
+    /// Maximum number of objects this pool can hold (set at construction time)
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Proactively remove all expired objects from the available queue.
@@ -430,6 +461,7 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// Returns the number of objects evicted. Call this periodically (e.g. from a
     /// `tokio::spawn` background task) when using TTL or idle-timeout eviction,
     /// because expiry is otherwise only enforced lazily on `get_object()`.
+    #[must_use = "returns the count of evicted objects"]
     pub fn evict_expired(&self) -> usize {
         let mut evicted = 0;
         let mut keep = Vec::new();
@@ -445,10 +477,9 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
 
         for item in keep {
             if Self::push_available_with_retry(&self.available, item).is_err() {
-                // Queue is unexpectedly full (concurrent returns filled it while we
-                // were scanning). Count the object as lost and update the metric.
+                // Queue unexpectedly full (concurrent returns filled it while we
+                // were scanning). Track this as a push failure — NOT as an eviction.
                 self.metrics.queue_push_failures.fetch_add(1, Ordering::Relaxed);
-                evicted += 1;
             }
         }
 
@@ -461,6 +492,7 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     /// Useful for graceful shutdown: drain the pool, then wait for active
     /// `PooledObject`s to be dropped (which will attempt to return to an empty
     /// queue; those objects are silently discarded).
+    #[must_use = "returns the drained objects"]
     pub fn drain(&self) -> Vec<T> {
         let mut objects = Vec::new();
         while let Some((obj, id)) = self.available.pop() {
@@ -487,21 +519,43 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
         }
         Ok(())
     }
-    
-    fn check_max_active(&self) -> PoolResult<()> {
-        if let Some(max) = self.config.max_active_objects
-            && self.active.len() >= max
-        {
-            return Err(PoolError::MaxActiveObjectsReached);
+
+    /// Atomically reserve an active slot.
+    ///
+    /// When `max_active_objects` is set this uses a CAS loop so that the
+    /// check-and-increment is a single atomic operation — eliminating the TOCTOU
+    /// race that existed when `active.len() >= max` was checked separately from
+    /// the subsequent increment.
+    fn try_acquire_active_slot(&self) -> PoolResult<()> {
+        match self.config.max_active_objects {
+            Some(max) => {
+                let mut current = self.active_count.load(Ordering::Acquire);
+                loop {
+                    if current >= max {
+                        return Err(PoolError::MaxActiveObjectsReached);
+                    }
+                    match self.active_count.compare_exchange_weak(
+                        current,
+                        current + 1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return Ok(()),
+                        Err(actual) => current = actual,
+                    }
+                }
+            }
+            None => {
+                self.active_count.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            }
         }
-        Ok(())
     }
     
     fn make_return_fn(&self) -> Arc<dyn Fn(T, usize) + Send + Sync> {
         let available = Arc::clone(&self.available);
-        let active = Arc::clone(&self.active);
+        let active_count = Arc::clone(&self.active_count);
         let metrics = Arc::clone(&self.metrics);
-        let health = Arc::clone(&self.health);
         let eviction = Arc::clone(&self.eviction);
         let config = Arc::clone(&self.config);
         
@@ -512,17 +566,16 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
                 && !validate(&obj)
             {
                 metrics.validation_failures.fetch_add(1, Ordering::Relaxed);
-                active.remove(&id);
+                active_count.fetch_sub(1, Ordering::AcqRel);
                 eviction.remove_object(id);
                 return;
             }
             
             eviction.touch_object(id);
-            active.remove(&id);
+            active_count.fetch_sub(1, Ordering::AcqRel);
             match ObjectPool::<T>::push_available_with_retry(available.as_ref(), (obj, id)) {
                 Ok(()) => {
                     metrics.total_returned.fetch_add(1, Ordering::Relaxed);
-                    health.increment_returned();
                 }
                 Err((_obj, failed_id)) => {
                     metrics.queue_push_failures.fetch_add(1, Ordering::Relaxed);
@@ -533,12 +586,12 @@ impl<T: Send + Sync + 'static> ObjectPool<T> {
     }
 
     fn make_detach_fn(&self) -> Arc<dyn Fn(usize) + Send + Sync> {
-        let active = Arc::clone(&self.active);
+        let active_count = Arc::clone(&self.active_count);
         let eviction = Arc::clone(&self.eviction);
         let metrics = Arc::clone(&self.metrics);
 
         Arc::new(move |id| {
-            active.remove(&id);
+            active_count.fetch_sub(1, Ordering::AcqRel);
             eviction.remove_object(id);
             metrics.total_detached.fetch_add(1, Ordering::Relaxed);
         })
@@ -592,14 +645,14 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
         }
     }
     
-    /// Get an object matching the query predicate
+    #[must_use = "the pool object must be used or explicitly dropped"]
     pub fn get_object<F>(&self, query: F) -> PoolResult<PooledObject<T>>
     where
         F: Fn(&T) -> bool,
     {
         self.inner.check_circuit_breaker()?;
-        self.inner.check_max_active()?;
-        
+        self.inner.try_acquire_active_slot()?;
+
         // Collect all available objects temporarily
         let mut temp_storage = Vec::new();
         let mut found = None;
@@ -629,11 +682,9 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
         }
         
         if let Some((obj, id)) = found {
-            self.inner.active.insert(id, ());
             self.inner.eviction.touch_object(id);
             self.inner.metrics.total_retrieved.fetch_add(1, Ordering::Relaxed);
-            self.inner.health.increment_retrieved();
-            
+
             if let Some(ref cb) = self.inner.circuit_breaker {
                 cb.record_success();
             }
@@ -642,6 +693,8 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
             let detach_fn = self.inner.make_detach_fn();
             Ok(PooledObject::new(obj, id, return_fn, detach_fn))
         } else {
+            // Release the slot we reserved — no match was found.
+            self.inner.active_count.fetch_sub(1, Ordering::AcqRel);
             if let Some(ref cb) = self.inner.circuit_breaker {
                 cb.record_failure();
             }
@@ -669,11 +722,14 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
         let timeout = self.inner.config.operation_timeout.unwrap_or(Duration::from_secs(30));
         
         tokio::time::timeout(timeout, async {
+            let mut attempt: u64 = 0;
             loop {
                 match self.try_get_object(&query) {
                     Ok(Some(obj)) => return Ok(obj),
                     Ok(None) => {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let delay = 5 + (attempt % 4) * 5;
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        attempt = attempt.wrapping_add(1);
                     }
                     Err(err) => return Err(err),
                 }
@@ -684,32 +740,49 @@ impl<T: Send + Sync + Clone + 'static> QueryableObjectPool<T> {
     }
     
     // Delegate methods to inner pool
+    #[must_use]
     pub fn get_health_status(&self) -> HealthStatus {
         self.inner.get_health_status()
     }
 
+    #[must_use]
     pub fn available_count(&self) -> usize {
         self.inner.available_count()
     }
 
+    #[must_use]
     pub fn active_count(&self) -> usize {
         self.inner.active_count()
     }
 
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
     /// Proactively remove expired objects. See [`ObjectPool::evict_expired`].
+    #[must_use = "returns the count of evicted objects"]
     pub fn evict_expired(&self) -> usize {
         self.inner.evict_expired()
     }
 
     /// Drain all available objects. See [`ObjectPool::drain`].
+    #[must_use = "returns the drained objects"]
     pub fn drain(&self) -> Vec<T> {
         self.inner.drain()
     }
 
+    #[must_use]
+    pub fn get_metrics(&self) -> PoolMetrics {
+        self.inner.get_metrics()
+    }
+
+    #[must_use]
     pub fn export_metrics(&self) -> HashMap<String, String> {
         self.inner.export_metrics()
     }
 
+    #[must_use]
     pub fn export_metrics_prometheus(
         &self,
         pool_name: &str,
@@ -776,6 +849,7 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
     /// A `Mutex` serialises the capacity check + creation step, preventing the
     /// TOCTOU race where two concurrent callers both see room and both create an
     /// object, exceeding the configured capacity.
+    #[must_use = "the pool object must be used or explicitly dropped"]
     pub fn get_object(&self) -> PoolResult<PooledObject<T>> {
         match self.inner.get_object() {
             Ok(obj) => Ok(obj),
@@ -784,19 +858,22 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
                 let _guard = self.create_lock.lock().unwrap_or_else(|p| p.into_inner());
 
                 // Re-check under the lock: a concurrent thread may have returned
-                // an object or hit capacity between the PoolEmpty error and here.
-                let total_live = self.inner.active.len() + self.inner.available.len();
+                // an object between the PoolEmpty error and here.
+                let total_live = self.inner.active_count.load(Ordering::Acquire)
+                    + self.inner.available.len();
                 if total_live >= self.inner.capacity {
                     return Err(PoolError::PoolFull);
                 }
+
+                // Also enforce max_active_objects in the dynamic creation path.
+                // Use the same CAS semaphore to remain race-free.
+                self.inner.try_acquire_active_slot()?;
 
                 let obj = (self.factory)();
                 let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
 
                 self.inner.eviction.track_object(id);
-                self.inner.active.insert(id, ());
                 self.inner.metrics.total_retrieved.fetch_add(1, Ordering::Relaxed);
-                self.inner.health.increment_retrieved();
 
                 // The inner `get_object()` recorded a CB failure for the empty
                 // queue. Since we successfully served the request, offset it with
@@ -825,11 +902,14 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
         let timeout = self.inner.config.operation_timeout.unwrap_or(Duration::from_secs(30));
         
         tokio::time::timeout(timeout, async {
+            let mut attempt: u64 = 0;
             loop {
                 match self.try_get_object() {
                     Ok(Some(obj)) => return Ok(obj),
                     Ok(None) => {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let delay = 5 + (attempt % 4) * 5;
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        attempt = attempt.wrapping_add(1);
                     }
                     Err(err) => return Err(err),
                 }
@@ -865,6 +945,9 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
             self.inner.eviction.track_object(id);
             
             if self.inner.available.push((obj, id)).is_err() {
+                // Queue is full; remove the eviction entry we just registered
+                // to avoid a leak.
+                self.inner.eviction.remove_object(id);
                 break;
             }
         }
@@ -886,6 +969,7 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
                 eviction.track_object(id);
                 
                 if available.push((obj, id)).is_err() {
+                    eviction.remove_object(id);
                     break;
                 }
             }
@@ -897,32 +981,49 @@ impl<T: Send + Sync + 'static> DynamicObjectPool<T> {
     }
     
     // Delegate methods
+    #[must_use]
     pub fn get_health_status(&self) -> HealthStatus {
         self.inner.get_health_status()
     }
 
+    #[must_use]
     pub fn available_count(&self) -> usize {
         self.inner.available_count()
     }
 
+    #[must_use]
     pub fn active_count(&self) -> usize {
         self.inner.active_count()
     }
 
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.inner.capacity()
+    }
+
     /// Proactively remove expired objects. See [`ObjectPool::evict_expired`].
+    #[must_use = "returns the count of evicted objects"]
     pub fn evict_expired(&self) -> usize {
         self.inner.evict_expired()
     }
 
     /// Drain all available objects. See [`ObjectPool::drain`].
+    #[must_use = "returns the drained objects"]
     pub fn drain(&self) -> Vec<T> {
         self.inner.drain()
     }
 
+    #[must_use]
+    pub fn get_metrics(&self) -> PoolMetrics {
+        self.inner.get_metrics()
+    }
+
+    #[must_use]
     pub fn export_metrics(&self) -> HashMap<String, String> {
         self.inner.export_metrics()
     }
 
+    #[must_use]
     pub fn export_metrics_prometheus(
         &self,
         pool_name: &str,
@@ -1985,6 +2086,91 @@ mod tests {
 
         let result = pool.get_object_async().await;
         assert!(matches!(result, Err(PoolError::Timeout(_))));
+    }
+
+    // ── New regression / feature tests ───────────────────────────────────────
+
+    #[test]
+    fn test_capacity_method() {
+        let pool = ObjectPool::new(vec![1, 2, 3], PoolConfiguration::new().with_max_pool_size(10));
+        assert_eq!(pool.capacity(), 10);
+
+        let q = QueryableObjectPool::new(vec![1, 2], PoolConfiguration::default());
+        assert_eq!(q.capacity(), 100); // default max_pool_size
+
+        let d = DynamicObjectPool::new(|| 0, PoolConfiguration::new().with_max_pool_size(7));
+        assert_eq!(d.capacity(), 7);
+    }
+
+    #[test]
+    fn test_get_metrics_on_delegate_pools() {
+        let q = QueryableObjectPool::new(vec![1, 2], PoolConfiguration::default());
+        let _ = q.get_object(|_| true).unwrap();
+        assert_eq!(q.get_metrics().total_retrieved, 1);
+
+        let d = DynamicObjectPool::new(|| 0, PoolConfiguration::new().with_max_pool_size(5));
+        let _ = d.get_object().unwrap();
+        assert_eq!(d.get_metrics().total_retrieved, 1);
+    }
+
+    #[test]
+    fn test_as_ref_as_mut_for_pooled_object() {
+        let pool = ObjectPool::new(vec![42i32], PoolConfiguration::default());
+        let mut obj = pool.get_object().unwrap();
+
+        // AsRef
+        let r: &i32 = obj.as_ref();
+        assert_eq!(*r, 42);
+
+        // AsMut
+        *obj.as_mut() = 99;
+        assert_eq!(*obj.as_ref(), 99);
+    }
+
+    #[test]
+    #[should_panic(expected = "ObjectPool capacity must be at least 1")]
+    fn test_zero_capacity_panics() {
+        ObjectPool::new(vec![] as Vec<i32>, PoolConfiguration::new().with_max_pool_size(0));
+    }
+
+    #[tokio::test]
+    async fn test_max_active_not_exceeded_under_concurrency() {
+        use std::sync::Arc;
+
+        let max = 3usize;
+        let pool = Arc::new(ObjectPool::new(
+            vec![0u32; 10],
+            PoolConfiguration::new()
+                .with_max_pool_size(10)
+                .with_max_active_objects(max),
+        ));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = vec![];
+        for _ in 0..20 {
+            let p = Arc::clone(&pool);
+            let pk = Arc::clone(&peak);
+            handles.push(tokio::spawn(async move {
+                if let Ok(Some(_obj)) = p.try_get_object() {
+                    let current = p.active_count();
+                    let mut prev = pk.load(Ordering::Relaxed);
+                    while current > prev {
+                        match pk.compare_exchange_weak(prev, current, Ordering::Relaxed, Ordering::Relaxed) {
+                            Ok(_) => break,
+                            Err(v) => prev = v,
+                        }
+                    }
+                }
+            }));
+        }
+        for h in handles { h.await.unwrap(); }
+
+        assert!(
+            peak.load(Ordering::Relaxed) <= max,
+            "active count peaked at {} > max {}",
+            peak.load(Ordering::Relaxed),
+            max
+        );
     }
 }
 

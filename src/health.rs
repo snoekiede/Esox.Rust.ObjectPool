@@ -1,8 +1,5 @@
 //! Health monitoring for object pools
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-
 /// Health status of an object pool
 ///
 /// # Examples
@@ -95,56 +92,6 @@ impl HealthStatus {
     }
 }
 
-/// Internal health tracker for pools
-#[allow(dead_code)]
-pub(crate) struct HealthTracker {
-    pub total_retrieved: Arc<AtomicUsize>,
-    pub total_returned: Arc<AtomicUsize>,
-    pub pool_empty_count: Arc<AtomicUsize>,
-    pub validation_failures: Arc<AtomicUsize>,
-    pub is_healthy: Arc<AtomicBool>,
-}
-
-impl HealthTracker {
-    pub fn new() -> Self {
-        Self {
-            total_retrieved: Arc::new(AtomicUsize::new(0)),
-            total_returned: Arc::new(AtomicUsize::new(0)),
-            pool_empty_count: Arc::new(AtomicUsize::new(0)),
-            validation_failures: Arc::new(AtomicUsize::new(0)),
-            is_healthy: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    pub fn increment_retrieved(&self) {
-        self.total_retrieved.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn increment_returned(&self) {
-        self.total_returned.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn increment_empty(&self) {
-        self.pool_empty_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub fn increment_validation_failure(&self) {
-        self.validation_failures.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[allow(dead_code)]
-    pub fn set_health(&self, healthy: bool) {
-        self.is_healthy.store(healthy, Ordering::Relaxed);
-    }
-}
-
-impl Default for HealthTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,4 +163,3 @@ mod tests {
         assert_eq!(h.warning_count, h.warnings.len());
     }
 }
-
