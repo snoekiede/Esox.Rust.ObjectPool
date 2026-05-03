@@ -96,11 +96,10 @@ impl<T> EvictionTracker<T> {
     }
 
     pub fn touch_object(&self, id: usize) {
-        if !matches!(self.policy, EvictionPolicy::None) {
-            if let Some(mut meta) = self.metadata.get_mut(&id) {
+        if !matches!(self.policy, EvictionPolicy::None)
+            && let Some(mut meta) = self.metadata.get_mut(&id) {
                 meta.touch();
             }
-        }
     }
 
     pub fn is_expired(&self, id: usize) -> bool {
@@ -109,7 +108,7 @@ impl<T> EvictionTracker<T> {
         }
         self.metadata
             .get(&id)
-            .map_or(false, |meta| meta.is_expired(&self.policy))
+            .is_some_and(|meta| meta.is_expired(&self.policy))
     }
 
     pub fn remove_object(&self, id: usize) {
